@@ -337,6 +337,94 @@ SAMPLE_TENNIS_RAW_PAYLOAD = {
     }
 }
 
+# Shape captured from a real, plain GET (x-api-key header only, no session/
+# cookies) to SupaBets' public matches endpoint for basketball:
+#   GET https://apib2c.supabets.co.za/api/frontend/matches/2/section/leagues
+#       ?n=1&league=990680&oddsGroupId=1456
+# (2 = basketball's sportTypeId, 990680 = NBA's eventId, 1456 = basketball's
+# own "Winner (incl. overT)" market group id -- NOT soccer/rugby's shared
+# 1433/"1x2", which for basketball is a different, 3-way group with a
+# priced "X" for scores level at the end of regulation before overtime;
+# verified via /api/frontend/events/990680/categories-and-odds-groups that
+# both groups exist and are distinct. See scraper.py's docstring for how
+# basketball's ids were found). Trimmed to two matches' worth of records;
+# field names, ids and decimal odds unchanged from the real response. Note
+# basketball's market uses its own market/outcome ids too (79140 /
+# 911729-911730, distinct from every other sport's) and only ever carries a
+# "1"/"2" legend (no "X") under this group -- structural, since a
+# basketball match always resolves to a winner (overtime periods exist
+# specifically to prevent a draw).
+SAMPLE_BASKETBALL_MATCHES_PAYLOAD = {
+    "events": [
+        {
+            "id": "639280512000000000",
+            "name": "20 October 2026",
+            "matchCount": 2,
+            "order": 0,
+            "sportType": None,
+            "matches": [
+                {
+                    "id": 197346765,
+                    "eventName": "NBA",
+                    "participants": [{"name": "Detroit Pistons"}, {"name": "Boston Celtics"}],
+                    "slug": "spa/sport/basket/usa/nba/197346765-detroit-pistons-boston-celtics",
+                    "start": "2026-10-20T19:00:00Z",
+                    "statisticsCode": "73682354",
+                    "oddsCount": 25,
+                    "odds": None,
+                },
+                {
+                    "id": 197347063,
+                    "eventName": "NBA",
+                    "participants": [{"name": "New York Knicks"}, {"name": "Philadelphia 76ers"}],
+                    "slug": "spa/sport/basket/usa/nba/197347063-new-york-knicks-philadelphia-76ers",
+                    "start": "2026-10-20T23:00:00Z",
+                    "statisticsCode": "73682356",
+                    "oddsCount": 25,
+                    "odds": None,
+                },
+            ],
+        },
+        {"id": "639281376000000000", "name": "21 October 2026", "matchCount": 4, "order": 1, "sportType": None},
+    ],
+    "odds": {
+        "197346765": {
+            "79140": {
+                "911729": {"0.00": {"id": "2b5db6563", "value": 1.78}},
+                "911730": {"0.00": {"id": "2b5db6564", "value": 2.01}},
+            }
+        },
+        "197347063": {
+            "79140": {
+                "911729": {"0.00": {"id": "2c08d3328", "value": 1.48}},
+                "911730": {"0.00": {"id": "2c08d4e2a", "value": 2.6}},
+            }
+        },
+    },
+    "markets": [
+        {
+            "id": 79140,
+            "name": "Winner (incl. overT)",
+            "options": [
+                {"id": 911729, "name": "1"},
+                {"id": 911730, "name": "2"},
+            ],
+            "hndValue": 0.0,
+            "oddsClassId": 79140,
+        }
+    ],
+}
+
+SAMPLE_BASKETBALL_RAW_PAYLOAD = {
+    "leagues": {
+        "990680": {
+            "league_name": "NBA",
+            "payload": SAMPLE_BASKETBALL_MATCHES_PAYLOAD,
+            "sport": "basketball",
+        }
+    }
+}
+
 
 def test_to_odds_events_joins_events_odds_and_markets_legend():
     scraper = SupaBetsScraper()
@@ -614,6 +702,83 @@ def test_to_odds_events_maps_tennis_outcome_labels_not_id_order():
     assert market.draw_odds is None
 
 
+def test_to_odds_events_tags_basketball_events_with_sport_basketball():
+    """Basketball league payloads carry an explicit "sport": "basketball"
+    tag (set by fetch_raw_odds) -- to_odds_events must read it off the raw
+    payload and, crucially, use it to look up basketball's own market name
+    ("Winner (incl. overT)", not "1x2") rather than the soccer/rugby
+    default."""
+    scraper = SupaBetsScraper()
+
+    events = scraper.to_odds_events(SAMPLE_BASKETBALL_RAW_PAYLOAD)
+
+    assert len(events) == 2
+    pistons_celtics = next(e for e in events if e.home_team == "Detroit Pistons")
+    assert pistons_celtics.away_team == "Boston Celtics"
+    assert pistons_celtics.sport == "basketball"
+    assert pistons_celtics.league == "NBA"
+    assert pistons_celtics.bookmaker == "supabets"
+    assert pistons_celtics.markets["moneyline"].home_odds == 1.78
+    assert pistons_celtics.markets["moneyline"].away_odds == 2.01
+    assert all(e.sport == "basketball" for e in events)
+
+
+def test_to_odds_events_basketball_market_is_two_way_no_draw():
+    """Basketball has no drawn final result at all -- overtime periods
+    exist specifically to force a winner -- so the "Winner (incl. overT)"
+    group only ever offers a "1"/"2" outcome legend. The existing
+    optional-draw_odds handling must publish a complete moneyline market
+    from just home/away without requiring a draw price."""
+    scraper = SupaBetsScraper()
+
+    events = scraper.to_odds_events(SAMPLE_BASKETBALL_RAW_PAYLOAD)
+
+    assert len(events) == 2
+    for event in events:
+        assert event.markets["moneyline"].home_odds is not None
+        assert event.markets["moneyline"].away_odds is not None
+        assert event.markets["moneyline"].draw_odds is None
+
+
+def test_to_odds_events_maps_basketball_outcome_labels_not_id_order():
+    """Same explicit-label-not-id-order guarantee every other sport has,
+    verified against basketball's own market/outcome ids (79140 /
+    911729-911730, distinct from every other sport's)."""
+    payload = {
+        **SAMPLE_BASKETBALL_MATCHES_PAYLOAD,
+        "odds": {
+            "197346765": SAMPLE_BASKETBALL_MATCHES_PAYLOAD["odds"]["197346765"],
+        },
+        "markets": [
+            {
+                "id": 79140,
+                "name": "Winner (incl. overT)",
+                # Deliberately swapped ids relative to the real capture, to
+                # prove label lookup drives the mapping rather than id
+                # ordering.
+                "options": [
+                    {"id": 911730, "name": "1"},
+                    {"id": 911729, "name": "2"},
+                ],
+                "hndValue": 0.0,
+                "oddsClassId": 79140,
+            }
+        ],
+    }
+    raw = {"leagues": {"990680": {"league_name": "NBA", "payload": payload, "sport": "basketball"}}}
+    scraper = SupaBetsScraper()
+
+    events = scraper.to_odds_events(raw)
+
+    assert len(events) == 1
+    market = events[0].markets["moneyline"]
+    # outcome 911730 (value 2.01) is now labelled "1" -> home
+    assert market.home_odds == 2.01
+    # outcome 911729 (value 1.78) is now labelled "2" -> away
+    assert market.away_odds == 1.78
+    assert market.draw_odds is None
+
+
 def test_to_odds_events_skips_league_missing_1x2_market_definition():
     payload = {**SAMPLE_MATCHES_PAYLOAD, "markets": []}
     raw = {"leagues": {"990625": {"league_name": "Premier League", "payload": payload}}}
@@ -794,12 +959,12 @@ async def test_poll_continues_past_a_transient_fetch_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fetch_raw_odds_polls_soccer_rugby_cricket_and_tennis_together_by_default(monkeypatch):
+async def test_fetch_raw_odds_polls_soccer_rugby_cricket_tennis_and_basketball_together_by_default(monkeypatch):
     """Default construction (no league_ids/rugby_league_ids/
-    cricket_league_ids/tennis_league_ids override) must poll soccer's,
-    rugby's, cricket's and tennis's default league lists additively -- the
-    core ask of adding tennis support -- and tag each league with the sport
-    it actually came from."""
+    cricket_league_ids/tennis_league_ids/basketball_league_ids override)
+    must poll soccer's, rugby's, cricket's, tennis's and basketball's
+    default league lists additively -- the core ask of adding basketball
+    support -- and tag each league with the sport it actually came from."""
     scraper = SupaBetsScraper()
 
     class FakeResponse:
@@ -823,6 +988,7 @@ async def test_fetch_raw_odds_polls_soccer_rugby_cricket_and_tennis_together_by_
     raw = await scraper.fetch_raw_odds()
 
     from supabets.scraper import (
+        DEFAULT_BASKETBALL_LEAGUE_IDS,
         DEFAULT_CRICKET_LEAGUE_IDS,
         DEFAULT_LEAGUE_IDS,
         DEFAULT_RUGBY_LEAGUE_IDS,
@@ -836,6 +1002,7 @@ async def test_fetch_raw_odds_polls_soccer_rugby_cricket_and_tennis_together_by_
             **DEFAULT_RUGBY_LEAGUE_IDS,
             **DEFAULT_CRICKET_LEAGUE_IDS,
             **DEFAULT_TENNIS_LEAGUE_IDS,
+            **DEFAULT_BASKETBALL_LEAGUE_IDS,
         }
     }
     assert set(raw["leagues"].keys()) == expected_league_ids
@@ -844,26 +1011,31 @@ async def test_fetch_raw_odds_polls_soccer_rugby_cricket_and_tennis_together_by_
     rugby_sports = {raw["leagues"][str(lid)]["sport"] for lid in DEFAULT_RUGBY_LEAGUE_IDS}
     cricket_sports = {raw["leagues"][str(lid)]["sport"] for lid in DEFAULT_CRICKET_LEAGUE_IDS}
     tennis_sports = {raw["leagues"][str(lid)]["sport"] for lid in DEFAULT_TENNIS_LEAGUE_IDS}
+    basketball_sports = {raw["leagues"][str(lid)]["sport"] for lid in DEFAULT_BASKETBALL_LEAGUE_IDS}
     assert soccer_sports == {"soccer"}
     assert rugby_sports == {"rugby"}
     assert cricket_sports == {"cricket"}
     assert tennis_sports == {"tennis"}
+    assert basketball_sports == {"basketball"}
 
     # Requests went to sportTypeId=1 (soccer), sportTypeId=14 (rugby),
-    # sportTypeId=9 (cricket) and sportTypeId=4 (tennis) matches endpoints.
+    # sportTypeId=9 (cricket), sportTypeId=4 (tennis) and sportTypeId=2
+    # (basketball) matches endpoints.
     assert any("/matches/1/" in url for url in seen_urls)
     assert any("/matches/14/" in url for url in seen_urls)
     assert any("/matches/9/" in url for url in seen_urls)
     assert any("/matches/4/" in url for url in seen_urls)
+    assert any("/matches/2/" in url for url in seen_urls)
 
 
 @pytest.mark.asyncio
-async def test_fetch_raw_odds_requests_cricket_and_tennis_own_odds_group_ids(monkeypatch):
-    """Cricket and tennis don't reuse soccer/rugby's shared oddsGroupId
-    1433 -- cricket's moneyline-equivalent market lives under 3764 ("Winner
-    (incl. super over)"), tennis's under 1583 ("Winner"). fetch_raw_odds
-    must request each sport's own group id specifically, not the
-    soccer/rugby default."""
+async def test_fetch_raw_odds_requests_cricket_tennis_and_basketball_own_odds_group_ids(monkeypatch):
+    """Cricket, tennis and basketball don't reuse soccer/rugby's shared
+    oddsGroupId 1433 -- cricket's moneyline-equivalent market lives under
+    3764 ("Winner (incl. super over)"), tennis's under 1583 ("Winner"), and
+    basketball's under 1456 ("Winner (incl. overT)"). fetch_raw_odds must
+    request each sport's own group id specifically, not the soccer/rugby
+    default."""
     scraper = SupaBetsScraper()
 
     class FakeResponse:
@@ -891,6 +1063,8 @@ async def test_fetch_raw_odds_requests_cricket_and_tennis_own_odds_group_ids(mon
     assert all(p["oddsGroupId"] == 3764 for p in seen_params_by_sport_type[9])
     # sportTypeId 4 = tennis
     assert all(p["oddsGroupId"] == 1583 for p in seen_params_by_sport_type[4])
+    # sportTypeId 2 = basketball
+    assert all(p["oddsGroupId"] == 1456 for p in seen_params_by_sport_type[2])
     # sportTypeId 1 = soccer, sportTypeId 14 = rugby, both still 1433
     assert all(p["oddsGroupId"] == 1433 for p in seen_params_by_sport_type[1])
     assert all(p["oddsGroupId"] == 1433 for p in seen_params_by_sport_type[14])
