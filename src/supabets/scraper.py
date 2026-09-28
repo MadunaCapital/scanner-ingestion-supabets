@@ -139,12 +139,57 @@ than assumed, per the discovery discipline above:
    needed, matching the module's existing "verify, don't force a
    structure" approach.
 
+Tennis was added the same way, verified rather than assumed per the same
+discipline:
+
+1. `/api/b2c/EventsProgram/sports-full` lists `{"sportId": 167,
+   "sportTypeId": 4, "name": "Tennis", "slug": "tennis",
+   "subEventsCount": 242}` -- tennis's `sportTypeId` for the matches
+   endpoint is 4 (distinct from its sportId, 167).
+2. `/api/b2c/EventsProgram/program?sportId=167` lists the full live tennis
+   program: 31 events across six groups -- ATP (8: singles+doubles draws
+   for Beijing/Chengdu/Hangzhou/Tokyo), WTA (1: Beijing Women Singles),
+   Challenger (12: ATP Challenger Tour singles+doubles draws), UTR Men (4)
+   and UTR Women (2) (UTR Pro Tennis Tour, a lower rung below the
+   Challenger tour), and WTA 125K (4: singles+doubles). Their subEventsCount
+   values sum to exactly 242, matching sports-full's count for sportId 167
+   precisely -- same "scope to what's actually listed" discipline as rugby
+   and cricket, not a hand-picked "major tournaments" subset the way
+   soccer's list is (tennis's whole live program here, unlike soccer's
+   100+ competitions, is still a bounded, enumerable list, and it rotates
+   week to week by nature of the tour calendar rather than being a stable
+   set of leagues, so there's nothing stabler to narrow down to) -- see
+   DEFAULT_TENNIS_LEAGUE_IDS. No ITF-branded tournament was live in the
+   program at discovery time (2026-09-28).
+3. `/api/frontend/events/{leagueId}/categories-and-odds-groups`, checked for
+   an ATP singles event (990659), an ATP doubles event (990880), and the
+   WTA singles event (990595), returned the *same* match-winner group in
+   all three: idGruppoQuota 1583, gruppoQuota "Winner" -- a tennis-specific
+   group id/name, not soccer/rugby's 1433/"1x2" nor cricket's 3764/"Winner
+   (incl. super over)". So tennis needed its own oddsGroupId
+   (TENNIS_ODDS_GROUP_ID = 1583) and market name (TENNIS_MARKET_NAME =
+   "Winner"), same as cricket needed its own and rugby didn't.
+4. A plain curl of `/api/frontend/matches/4/section/leagues?n=1&league=<id>
+   &oddsGroupId=1583` for the singles, doubles, and WTA sample leagues above
+   (just the `x-api-key` header, no cookies/session) returned 200s with real
+   matches and live decimal odds. The market shape is **2-way only**, same
+   as cricket's currently-live competitions: `markets[0].options` is just
+   `[{"id": 912161, "name": "1"}, {"id": 912162, "name": "2"}]`, no "X"/draw
+   slot -- expected and structural for tennis, which has no drawn result at
+   all (unlike cricket's Test-match exception). Doubles matches carry the
+   exact same two-`participants`-entries shape as singles (each entry's
+   `name` is the pair as one string, e.g. "Andreozzi G / Guinard M"), so no
+   parsing branch was needed for doubles vs. singles either -- the existing
+   `participants[0]`/`participants[1]` join and optional-`draw_odds`
+   handling cover tennis natively, confirmed against the real response
+   rather than assumed.
+
 Because the market *name* and *group id* now vary by sport (soccer/rugby
-share "1x2"/1433; cricket is "Winner (incl. super over)"/3764),
-`fetch_raw_odds` and `to_odds_events` resolve both per-sport via
-MARKET_NAME_BY_SPORT / ODDS_GROUP_ID_BY_SPORT (keyed off the same `sport`
-tag used for OddsEvent.sport) instead of the single hardcoded constant used
-before cricket existed.
+share "1x2"/1433; cricket is "Winner (incl. super over)"/3764; tennis is
+"Winner"/1583), `fetch_raw_odds` and `to_odds_events` resolve both per-sport
+via MARKET_NAME_BY_SPORT / ODDS_GROUP_ID_BY_SPORT (keyed off the same
+`sport` tag used for OddsEvent.sport) instead of the single hardcoded
+constant used before cricket existed.
 """
 
 import asyncio
@@ -178,6 +223,11 @@ RUGBY_SPORT_TYPE_ID = 14
 # docstring.
 CRICKET_SPORT_TYPE_ID = 9
 
+# Tennis's sportTypeId (distinct from its sportId, 167) -- found the same
+# way as soccer's/rugby's/cricket's, via EventsProgram/sports-full. See
+# module docstring.
+TENNIS_SPORT_TYPE_ID = 4
+
 # "1x2" (moneyline) market group id, confirmed constant across leagues by
 # checking /api/frontend/events/{leagueId}/categories-and-odds-groups for
 # both Premier League (990625) and LaLiga (990618) -- both returned
@@ -195,20 +245,31 @@ ONE_X_TWO_MARKET_NAME = "1x2"
 CRICKET_ODDS_GROUP_ID = 3764
 CRICKET_MARKET_NAME = "Winner (incl. super over)"
 
+# Tennis's moneyline-equivalent market group, confirmed via
+# categories-and-odds-groups for an ATP singles, ATP doubles, and WTA
+# singles league -- this platform does NOT reuse 1433/"1x2" (soccer/rugby)
+# or 3764/"Winner (incl. super over)" (cricket) for tennis either; tennis's
+# match-winner group is idGruppoQuota 1583 named "Winner". See module
+# docstring.
+TENNIS_ODDS_GROUP_ID = 1583
+TENNIS_MARKET_NAME = "Winner"
+
 # Per-sport lookup for the oddsGroupId to request and the markets[].name to
 # match on when parsing -- soccer and rugby share the platform-wide
-# "1x2"/1433 pair, cricket does not (see module docstring). Keyed off the
-# same `sport` tag fetch_raw_odds attaches to each league and
-# to_odds_events reads back off the payload.
+# "1x2"/1433 pair, cricket and tennis each have their own (see module
+# docstring). Keyed off the same `sport` tag fetch_raw_odds attaches to each
+# league and to_odds_events reads back off the payload.
 ODDS_GROUP_ID_BY_SPORT: dict[str, int] = {
     "soccer": ONE_X_TWO_ODDS_GROUP_ID,
     "rugby": ONE_X_TWO_ODDS_GROUP_ID,
     "cricket": CRICKET_ODDS_GROUP_ID,
+    "tennis": TENNIS_ODDS_GROUP_ID,
 }
 MARKET_NAME_BY_SPORT: dict[str, str] = {
     "soccer": ONE_X_TWO_MARKET_NAME,
     "rugby": ONE_X_TWO_MARKET_NAME,
     "cricket": CRICKET_MARKET_NAME,
+    "tennis": TENNIS_MARKET_NAME,
 }
 
 # Outcome label -> universal market field, from the response's own
@@ -217,7 +278,9 @@ MARKET_NAME_BY_SPORT: dict[str, str] = {
 # "X") since every currently-live competition is limited-overs (T20/ODI),
 # where a drawn result isn't possible -- draw_odds simply stays unset for
 # those events, the same already-optional handling rugby's rare-but-present
-# draw slot exercises the other direction. See module docstring.
+# draw slot exercises the other direction. Tennis's payloads are always
+# "1"/"2" only too, structurally rather than incidentally -- a tennis match
+# has no drawn result at all. See module docstring.
 OUTCOME_LABEL_TO_FIELD = {"1": "home_odds", "X": "draw_odds", "2": "away_odds"}
 
 # Soccer competition eventIds (from /api/b2c/EventsProgram/program?sportId=163
@@ -266,6 +329,57 @@ DEFAULT_CRICKET_LEAGUE_IDS: dict[int, str] = {
     1054464: "National Cricket League, Women",
 }
 
+# Tennis event/draw eventIds (from /api/b2c/EventsProgram/program?sportId=167),
+# same discovery path as soccer's/rugby's/cricket's default league lists.
+# This is the *entire* live tennis program on the platform (31 events across
+# six groups, summing to exactly 242 subEventsCount, matching sports-full's
+# count for sportId 167) -- not a narrowed-down subset, the same "scope to
+# what's actually listed" discipline as rugby/cricket rather than soccer's
+# hand-picked major-leagues list. Tennis tournaments rotate week to week by
+# nature of the tour calendar, so this list is expected to go stale faster
+# than soccer/rugby/cricket's; widen/replace it via the `tennis_league_ids`
+# constructor param the same way the other sports' lists are overridden. See
+# module docstring for why no ITF-branded tournament is included (none was
+# live at discovery time).
+DEFAULT_TENNIS_LEAGUE_IDS: dict[int, str] = {
+    # ATP tour (Beijing/Chengdu/Hangzhou/Tokyo singles + doubles draws)
+    990880: "ATP Beijing, China Men Doubles",
+    990659: "ATP Beijing, China Men Singles",
+    991138: "ATP Chengdu, China Men Doubles",
+    991040: "ATP Chengdu, China Men Singles",
+    991122: "ATP Hangzhou, China Men Doubles",
+    991024: "ATP Hangzhou, China Men Singles",
+    991102: "ATP Tokyo, Japan Men Doubles",
+    990725: "ATP Tokyo, Japan Men Singles",
+    # WTA tour
+    990595: "WTA Beijing, China Women Singles",
+    # ATP Challenger tour
+    1545756: "ATP Challenger Bari, Italy Men Doubles",
+    1544826: "ATP Challenger Bari, Italy Men Singles",
+    1258922: "ATP Challenger Columbus, USA Men Doubles",
+    1258771: "ATP Challenger Columbus, USA Men Singles",
+    1008111: "ATP Challenger Curitiba, Brazil Men Doubles",
+    1007473: "ATP Challenger Curitiba, Brazil Men Singles",
+    1265019: "ATP Challenger Jingshan, China, Men Doubles",
+    1264321: "ATP Challenger Jingshan, China, Men Singles",
+    990723: "ATP Challenger Mouilleron-Le-Captif, France Men Doubles",
+    990700: "ATP Challenger Mouilleron-Le-Captif, France Men Singles",
+    1242009: "ATP Challenger Porto 2, Portugal Men Doubles",
+    1242376: "ATP Challenger Porto 2, Portugal Men Singles",
+    # UTR Pro Tennis Tour
+    1253524: "UTR PTT Ithaca Men 01",
+    1545530: "UTR PTT Le Cap d Agde Men 02",
+    1544869: "UTR PTT Newport Beach Men 23",
+    1544897: "UTR PTT Saitama Men 10",
+    1544868: "UTR PTT Ithaca Women 01",
+    1544867: "UTR PTT Newport Beach Women 23",
+    # WTA 125K tour
+    1545531: "WTA 125K Adana, Turkiye Women Doubles",
+    1542951: "WTA 125K Adana, Turkiye Women Singles",
+    1264313: "WTA 125K Jingshan, China Women Doubles",
+    1261833: "WTA 125K Jingshan, China Women Singles",
+}
+
 # Plain, fixed-interval polling -- same cadence as a normal page refresh,
 # not randomized or disguised to look human.
 DEFAULT_POLL_INTERVAL_SECONDS = 45
@@ -280,20 +394,22 @@ class SupaBetsScraper(BaseScraper):
         sport_type_id: int = SOCCER_SPORT_TYPE_ID,
         rugby_league_ids: dict[int, str] | None = None,
         cricket_league_ids: dict[int, str] | None = None,
+        tennis_league_ids: dict[int, str] | None = None,
     ):
         """`league_ids`/`sport_type_id` are the original soccer-only
         constructor params and keep their original meaning: passing
         `league_ids` explicitly scopes this scraper to *just* that single
         sport (soccer by default, or whichever `sport_type_id` is given),
-        the same override behavior as before rugby/cricket support existed
-        -- it does not also implicitly pull in rugby or cricket.
+        the same override behavior as before rugby/cricket/tennis support
+        existed -- it does not also implicitly pull in rugby, cricket or
+        tennis.
 
-        Leave `league_ids`, `rugby_league_ids` and `cricket_league_ids` all
-        unset (the default) to get the additive behavior: soccer's,
-        rugby's and cricket's default league lists polled together every
-        cycle. Pass `rugby_league_ids`/`cricket_league_ids` to widen or
-        narrow that sport's scope the same way `league_ids` does for
-        soccer.
+        Leave `league_ids`, `rugby_league_ids`, `cricket_league_ids` and
+        `tennis_league_ids` all unset (the default) to get the additive
+        behavior: soccer's, rugby's, cricket's and tennis's default league
+        lists polled together every cycle. Pass `rugby_league_ids`/
+        `cricket_league_ids`/`tennis_league_ids` to widen or narrow that
+        sport's scope the same way `league_ids` does for soccer.
         """
         self.league_ids = league_ids if league_ids is not None else dict(DEFAULT_LEAGUE_IDS)
         self.sport_type_id = sport_type_id
@@ -304,6 +420,8 @@ class SupaBetsScraper(BaseScraper):
                 sport_name = "rugby"
             elif sport_type_id == CRICKET_SPORT_TYPE_ID:
                 sport_name = "cricket"
+            elif sport_type_id == TENNIS_SPORT_TYPE_ID:
+                sport_name = "tennis"
             else:
                 sport_name = "soccer"
             self._sport_scopes: list[tuple[int, str, dict[int, str]]] = [
@@ -322,27 +440,33 @@ class SupaBetsScraper(BaseScraper):
                     "cricket",
                     cricket_league_ids if cricket_league_ids is not None else dict(DEFAULT_CRICKET_LEAGUE_IDS),
                 ),
+                (
+                    TENNIS_SPORT_TYPE_ID,
+                    "tennis",
+                    tennis_league_ids if tennis_league_ids is not None else dict(DEFAULT_TENNIS_LEAGUE_IDS),
+                ),
             ]
 
         self._client = httpx.AsyncClient(timeout=10, headers=API_KEY_HEADER)
 
     async def fetch_raw_odds(self) -> dict:
         """Fetches the nearest-matchday odds for each configured league,
-        across every configured sport (soccer and, by default, rugby and
-        cricket).
+        across every configured sport (soccer and, by default, rugby,
+        cricket and tennis).
 
         Unlike Betway ZA/WSB's single bulk call, SupaBets has no "all
         matches" endpoint -- each league is its own HTTP request. A single
         league's request failing (transient network blip, that one
         competition temporarily unavailable) is caught and logged here
         rather than aborting the whole poll cycle: the other leagues'
-        odds -- soccer, rugby or cricket -- are still worth publishing that
-        cycle.
+        odds -- soccer, rugby, cricket or tennis -- are still worth
+        publishing that cycle.
 
         The oddsGroupId requested is resolved per sport (via
         ODDS_GROUP_ID_BY_SPORT) rather than a single hardcoded constant --
-        cricket's moneyline-equivalent market lives under a different group
-        id than soccer/rugby's shared 1433 (see module docstring).
+        cricket's and tennis's moneyline-equivalent markets each live under
+        their own group id, distinct from soccer/rugby's shared 1433 (see
+        module docstring).
         """
         leagues_raw: dict[str, dict] = {}
         for sport_type_id, sport_name, league_ids in self._sport_scopes:
@@ -381,16 +505,19 @@ class SupaBetsScraper(BaseScraper):
         {id, value} -- joined here the same way Betway ZA joins its
         parallel events/markets/outcomes/prices arrays. Outcome labels
         ("1"/"X"/"2", or just "1"/"2" for cricket's currently-live
-        limited-overs matches) come from the payload's own
-        `markets[].options[]` legend, not inferred from outcome-id sort
-        order. Rugby's odds payloads use this exact same shape and
-        market/label legend as soccer's (verified live for all of
-        DEFAULT_RUGBY_LEAGUE_IDS -- see module docstring), so no
+        limited-overs matches and for tennis, which has no drawn result at
+        all) come from the payload's own `markets[].options[]` legend, not
+        inferred from outcome-id sort order. Rugby's odds payloads use this
+        exact same shape and market/label legend as soccer's (verified live
+        for all of DEFAULT_RUGBY_LEAGUE_IDS -- see module docstring), so no
         sport-specific parsing branch is needed for rugby, only the `sport`
-        tag on the resulting OddsEvent. Cricket's payloads use the same
-        shape too, but a different market name/id (see MARKET_NAME_BY_SPORT
-        and the module docstring) -- resolved here per-sport rather than
-        assumed.
+        tag on the resulting OddsEvent. Cricket's and tennis's payloads use
+        the same shape too, but each with its own market name/id (see
+        MARKET_NAME_BY_SPORT and the module docstring) -- resolved here
+        per-sport rather than assumed. Tennis's `participants` entries (one
+        per side, singles or doubles alike -- a doubles entry's `name` is
+        the pair as one string, e.g. "Cash R / Erler A") also fit the
+        existing two-participant join without any sport-specific branching.
 
         Note event_id (the OddsEvent field) is left unset here -- that's
         the engine's job downstream (see the note on OddsEvent.event_id in

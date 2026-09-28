@@ -251,6 +251,92 @@ SAMPLE_CRICKET_RAW_PAYLOAD = {
     }
 }
 
+# Shape captured from a real, plain GET (x-api-key header only, no session/
+# cookies) to SupaBets' public matches endpoint for tennis:
+#   GET https://apib2c.supabets.co.za/api/frontend/matches/4/section/leagues
+#       ?n=1&league=990659&oddsGroupId=1583
+# (4 = tennis's sportTypeId, 990659 = ATP Beijing, China Men Singles'
+# eventId, 1583 = tennis's own "Winner" market group id -- NOT soccer/
+# rugby's shared 1433/"1x2" nor cricket's 3764/"Winner (incl. super over)";
+# verified via /api/frontend/events/990659/categories-and-odds-groups. See
+# scraper.py's docstring for how tennis's ids were found). Trimmed to two
+# matches' worth of records; field names, ids and decimal odds unchanged
+# from the real response. Note tennis's market uses its own market/outcome
+# ids too (79267 / 912161-912162, distinct from soccer/rugby's 79117/
+# 911679-911681 and cricket's 87955/986175-986176) and only ever carries a
+# "1"/"2" legend (no "X") -- structural for tennis, which has no drawn
+# result at all (unlike cricket's Test-match exception).
+SAMPLE_TENNIS_MATCHES_PAYLOAD = {
+    "events": [
+        {
+            "id": "639262368000000000",
+            "name": "Tomorrow",
+            "matchCount": 4,
+            "order": 0,
+            "sportType": None,
+            "matches": [
+                {
+                    "id": 204471292,
+                    "eventName": "ATP Beijing, China Men Singles",
+                    "participants": [{"name": "Mannarino, Adrian"}, {"name": "Carreno Busta, Pablo"}],
+                    "slug": "spa/sport/tennis/atp/atp-beijing-china-men-singles/204471292-mannarino-adrian-carreno-busta-pablo",
+                    "start": "2026-09-29T02:00:00Z",
+                    "statisticsCode": "75110448",
+                    "oddsCount": 68,
+                    "odds": None,
+                },
+                {
+                    "id": 204459063,
+                    "eventName": "ATP Beijing, China Men Singles",
+                    "participants": [{"name": "Trungelliti, Marco"}, {"name": "Molcan, Alex"}],
+                    "slug": "spa/sport/tennis/atp/atp-beijing-china-men-singles/204459063-trungelliti-marco-molcan-alex",
+                    "start": "2026-09-29T02:00:00Z",
+                    "statisticsCode": "75107802",
+                    "oddsCount": 68,
+                    "odds": None,
+                },
+            ],
+        },
+        {"id": "639263232000000000", "name": "30 September 2026", "matchCount": 12, "order": 1, "sportType": None},
+    ],
+    "odds": {
+        "204471292": {
+            "79267": {
+                "912161": {"0.00": {"id": "2c32fb568", "value": 2.39}},
+                "912162": {"0.00": {"id": "2c32fb569", "value": 1.56}},
+            }
+        },
+        "204459063": {
+            "79267": {
+                "912161": {"0.00": {"id": "2c3304458", "value": 2.09}},
+                "912162": {"0.00": {"id": "2c3304459", "value": 1.72}},
+            }
+        },
+    },
+    "markets": [
+        {
+            "id": 79267,
+            "name": "Winner",
+            "options": [
+                {"id": 912161, "name": "1"},
+                {"id": 912162, "name": "2"},
+            ],
+            "hndValue": 0.0,
+            "oddsClassId": 79267,
+        }
+    ],
+}
+
+SAMPLE_TENNIS_RAW_PAYLOAD = {
+    "leagues": {
+        "990659": {
+            "league_name": "ATP Beijing, China Men Singles",
+            "payload": SAMPLE_TENNIS_MATCHES_PAYLOAD,
+            "sport": "tennis",
+        }
+    }
+}
+
 
 def test_to_odds_events_joins_events_odds_and_markets_legend():
     scraper = SupaBetsScraper()
@@ -448,6 +534,86 @@ def test_to_odds_events_maps_cricket_outcome_labels_not_id_order():
     assert market.draw_odds is None
 
 
+def test_to_odds_events_tags_tennis_events_with_sport_tennis():
+    """Tennis league payloads carry an explicit "sport": "tennis" tag (set
+    by fetch_raw_odds) -- to_odds_events must read it off the raw payload
+    and, crucially, use it to look up tennis's own market name ("Winner",
+    not "1x2") rather than the soccer/rugby default."""
+    scraper = SupaBetsScraper()
+
+    events = scraper.to_odds_events(SAMPLE_TENNIS_RAW_PAYLOAD)
+
+    assert len(events) == 2
+    mannarino_match = next(e for e in events if e.home_team == "Mannarino, Adrian")
+    assert mannarino_match.away_team == "Carreno Busta, Pablo"
+    assert mannarino_match.sport == "tennis"
+    assert mannarino_match.league == "ATP Beijing, China Men Singles"
+    assert mannarino_match.bookmaker == "supabets"
+    assert mannarino_match.markets["moneyline"].home_odds == 2.39
+    assert mannarino_match.markets["moneyline"].away_odds == 1.56
+    assert all(e.sport == "tennis" for e in events)
+
+
+def test_to_odds_events_tennis_market_is_two_way_no_draw():
+    """Tennis has no drawn result at all (structural, unlike cricket's rare
+    Test-match exception) -- every live payload only ever offers a "1"/"2"
+    outcome legend. The existing optional-draw_odds handling must publish a
+    complete moneyline market from just home/away without requiring a draw
+    price."""
+    scraper = SupaBetsScraper()
+
+    events = scraper.to_odds_events(SAMPLE_TENNIS_RAW_PAYLOAD)
+
+    assert len(events) == 2
+    for event in events:
+        assert event.markets["moneyline"].home_odds is not None
+        assert event.markets["moneyline"].away_odds is not None
+        assert event.markets["moneyline"].draw_odds is None
+
+
+def test_to_odds_events_maps_tennis_outcome_labels_not_id_order():
+    """Same explicit-label-not-id-order guarantee soccer/rugby/cricket have,
+    verified against tennis's own market/outcome ids (79267 /
+    912161-912162, distinct from every other sport's)."""
+    payload = {
+        **SAMPLE_TENNIS_MATCHES_PAYLOAD,
+        "odds": {
+            "204471292": SAMPLE_TENNIS_MATCHES_PAYLOAD["odds"]["204471292"],
+        },
+        "markets": [
+            {
+                "id": 79267,
+                "name": "Winner",
+                # Deliberately swapped ids relative to the real capture, to
+                # prove label lookup drives the mapping rather than id
+                # ordering.
+                "options": [
+                    {"id": 912162, "name": "1"},
+                    {"id": 912161, "name": "2"},
+                ],
+                "hndValue": 0.0,
+                "oddsClassId": 79267,
+            }
+        ],
+    }
+    raw = {
+        "leagues": {
+            "990659": {"league_name": "ATP Beijing, China Men Singles", "payload": payload, "sport": "tennis"}
+        }
+    }
+    scraper = SupaBetsScraper()
+
+    events = scraper.to_odds_events(raw)
+
+    assert len(events) == 1
+    market = events[0].markets["moneyline"]
+    # outcome 912162 (value 1.56) is now labelled "1" -> home
+    assert market.home_odds == 1.56
+    # outcome 912161 (value 2.39) is now labelled "2" -> away
+    assert market.away_odds == 2.39
+    assert market.draw_odds is None
+
+
 def test_to_odds_events_skips_league_missing_1x2_market_definition():
     payload = {**SAMPLE_MATCHES_PAYLOAD, "markets": []}
     raw = {"leagues": {"990625": {"league_name": "Premier League", "payload": payload}}}
@@ -628,11 +794,12 @@ async def test_poll_continues_past_a_transient_fetch_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fetch_raw_odds_polls_soccer_rugby_and_cricket_together_by_default(monkeypatch):
+async def test_fetch_raw_odds_polls_soccer_rugby_cricket_and_tennis_together_by_default(monkeypatch):
     """Default construction (no league_ids/rugby_league_ids/
-    cricket_league_ids override) must poll soccer's, rugby's and cricket's
-    default league lists additively -- the core ask of adding cricket
-    support -- and tag each league with the sport it actually came from."""
+    cricket_league_ids/tennis_league_ids override) must poll soccer's,
+    rugby's, cricket's and tennis's default league lists additively -- the
+    core ask of adding tennis support -- and tag each league with the sport
+    it actually came from."""
     scraper = SupaBetsScraper()
 
     class FakeResponse:
@@ -655,33 +822,48 @@ async def test_fetch_raw_odds_polls_soccer_rugby_and_cricket_together_by_default
 
     raw = await scraper.fetch_raw_odds()
 
-    from supabets.scraper import DEFAULT_CRICKET_LEAGUE_IDS, DEFAULT_LEAGUE_IDS, DEFAULT_RUGBY_LEAGUE_IDS
+    from supabets.scraper import (
+        DEFAULT_CRICKET_LEAGUE_IDS,
+        DEFAULT_LEAGUE_IDS,
+        DEFAULT_RUGBY_LEAGUE_IDS,
+        DEFAULT_TENNIS_LEAGUE_IDS,
+    )
 
     expected_league_ids = {
-        str(k) for k in {**DEFAULT_LEAGUE_IDS, **DEFAULT_RUGBY_LEAGUE_IDS, **DEFAULT_CRICKET_LEAGUE_IDS}
+        str(k)
+        for k in {
+            **DEFAULT_LEAGUE_IDS,
+            **DEFAULT_RUGBY_LEAGUE_IDS,
+            **DEFAULT_CRICKET_LEAGUE_IDS,
+            **DEFAULT_TENNIS_LEAGUE_IDS,
+        }
     }
     assert set(raw["leagues"].keys()) == expected_league_ids
 
     soccer_sports = {raw["leagues"][str(lid)]["sport"] for lid in DEFAULT_LEAGUE_IDS}
     rugby_sports = {raw["leagues"][str(lid)]["sport"] for lid in DEFAULT_RUGBY_LEAGUE_IDS}
     cricket_sports = {raw["leagues"][str(lid)]["sport"] for lid in DEFAULT_CRICKET_LEAGUE_IDS}
+    tennis_sports = {raw["leagues"][str(lid)]["sport"] for lid in DEFAULT_TENNIS_LEAGUE_IDS}
     assert soccer_sports == {"soccer"}
     assert rugby_sports == {"rugby"}
     assert cricket_sports == {"cricket"}
+    assert tennis_sports == {"tennis"}
 
-    # Requests went to sportTypeId=1 (soccer), sportTypeId=14 (rugby) and
-    # sportTypeId=9 (cricket) matches endpoints.
+    # Requests went to sportTypeId=1 (soccer), sportTypeId=14 (rugby),
+    # sportTypeId=9 (cricket) and sportTypeId=4 (tennis) matches endpoints.
     assert any("/matches/1/" in url for url in seen_urls)
     assert any("/matches/14/" in url for url in seen_urls)
     assert any("/matches/9/" in url for url in seen_urls)
+    assert any("/matches/4/" in url for url in seen_urls)
 
 
 @pytest.mark.asyncio
-async def test_fetch_raw_odds_requests_cricket_own_odds_group_id(monkeypatch):
-    """Cricket doesn't reuse soccer/rugby's shared oddsGroupId 1433 -- its
-    own moneyline-equivalent market lives under 3764 ("Winner (incl. super
-    over)"). fetch_raw_odds must request that group id for cricket leagues
-    specifically, not the soccer/rugby default."""
+async def test_fetch_raw_odds_requests_cricket_and_tennis_own_odds_group_ids(monkeypatch):
+    """Cricket and tennis don't reuse soccer/rugby's shared oddsGroupId
+    1433 -- cricket's moneyline-equivalent market lives under 3764 ("Winner
+    (incl. super over)"), tennis's under 1583 ("Winner"). fetch_raw_odds
+    must request each sport's own group id specifically, not the
+    soccer/rugby default."""
     scraper = SupaBetsScraper()
 
     class FakeResponse:
@@ -707,6 +889,8 @@ async def test_fetch_raw_odds_requests_cricket_own_odds_group_id(monkeypatch):
 
     # sportTypeId 9 = cricket
     assert all(p["oddsGroupId"] == 3764 for p in seen_params_by_sport_type[9])
+    # sportTypeId 4 = tennis
+    assert all(p["oddsGroupId"] == 1583 for p in seen_params_by_sport_type[4])
     # sportTypeId 1 = soccer, sportTypeId 14 = rugby, both still 1433
     assert all(p["oddsGroupId"] == 1433 for p in seen_params_by_sport_type[1])
     assert all(p["oddsGroupId"] == 1433 for p in seen_params_by_sport_type[14])
