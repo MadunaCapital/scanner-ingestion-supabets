@@ -232,13 +232,99 @@ discipline:
    `draw_odds` handle this shape natively; no new market-shape branching was
    needed.
 
+Motorsport (F1 and similar) was investigated with a scoping question that
+none of the prior sports faced: motorsport's standard product is an
+*outright* (every driver in the field priced to win a race/championship),
+which this project's 2-3-outcome OddsEvent/MarketOdds schema fundamentally
+cannot represent -- so the search was specifically for a genuine 2-way
+head-to-head (H2H) market, not the outright/race-winner field, verified
+rather than assumed to exist per the same discipline as every sport above:
+
+1. `/api/b2c/EventsProgram/sports-full` lists motorsport split across
+   several distinct sportIds, not one: `{"sportId": 237, "sportTypeId": 0,
+   "name": "Motor Car Racing", "slug": "motor-car-racing",
+   "subEventsCount": 209}` (the live per-race-weekend program -- qualifying
+   and race props for the current F1 round), `{"sportId": 256,
+   "sportTypeId": 0, "name": "Motor Car Outrights", "slug":
+   "motor-car-outrights", "antepost": true, "subEventsCount": 9}` (F1
+   championship-level markets), `{"sportId": 262, "sportTypeId": 3, "name":
+   "Motorcycle Outrights", ..., "subEventsCount": 16}` (MotoGP), and a
+   separate antepost `"Nascar"` (sportId 251). Motor Car Racing/Motor Car
+   Outrights share sportTypeId 0 with several unrelated sports on this
+   platform (MMA, Floorball, Soccer Goalscorers) -- confirmed harmless for
+   the matches endpoint below since it's the specific league/event id, not
+   the sportTypeId, that actually selects the right data (verified live,
+   see point 4).
+2. `/api/b2c/EventsProgram/program?sportId=237` (Motor Car Racing, the
+   per-race-weekend program) lists only field/outright-shaped props for the
+   current live round (Bahrain-Malaysia GP): Race/Qualifying Winner, Top 3,
+   Winning Constructor, Fastest Lap Winner, First Driver/Constructor
+   Retirement, Winning Margin, Winning Nationality, etc. -- every one of
+   these is an N-way field market over the whole grid, confirmed via
+   `categories-and-odds-groups` (point 3), so none of them qualifies.
+   `/api/b2c/EventsProgram/program?sportId=256` (Motor Car Outrights)
+   separately lists exactly three F1 championship-level markets: "Drivers
+   Championship 2026 - Winner" (eventId 1316606, the outright, 7
+   subEvents), "Drivers Championship 2026 - Season H2H" (eventId 1320917, 1
+   subEvent) and "Constructors Championship - Season H2H" (eventId
+   1378715, 1 subEvent) -- the "Season H2H" naming is the first hint of a
+   genuine two-way product, distinct from the "Winner" outright next to it.
+   MotoGP's and NASCAR's outright programs (sportId 262 / 251) list only
+   "... Winner" events, no H2H-named market at all -- so, unlike the other
+   sports where the *whole* live program got scoped in, motorsport's H2H
+   product on this platform is F1-only right now; MotoGP/NASCAR were
+   checked, not assumed absent (point 3).
+3. `/api/frontend/events/{leagueId}/categories-and-odds-groups`, checked for
+   every candidate above, cleanly separates the two shapes: the outright
+   "Winner" events (1316606 Drivers Championship Winner, 1544853 Bahrain
+   Race Winner, 1546177 Bahrain Qualifying Winner, 1368599 MotoGP World
+   Championship Winner, 1378150/1378147 NASCAR Winners) all report a
+   `"gruppoQuota": "Final Result"` group with `"colonne": 1` (one column --
+   a field of N rows, one per driver/constructor, not a 2-way market). The
+   two "Season H2H" events (1320917, 1378715) instead report
+   `"idGruppoQuota": 4325, "gruppoQuota": "Head/Head", "righe": 1,
+   "colonne": 2` -- one row, two columns, i.e. exactly the 2-way shape this
+   adapter needs, and a platform-wide group id (not F1-specific, going by
+   its low id relative to 559-prefixed per-market codes elsewhere) reused
+   for both the drivers' and constructors' pairing.
+4. A plain curl of `/api/frontend/matches/0/section/leagues?n=1&league=
+   1320917&oddsGroupId=4325` (0 = the sportTypeId `sports-full` itself lists
+   for both Motor Car Racing and Motor Car Outrights; just the `x-api-key`
+   header, no cookies/session) returned a 200 with one real, live, priced
+   match: `participants` `["Bortoleto, Gabriel", "Hulkenberg, Nico"]`,
+   `markets[0]` `{"id": 88577, "name": "Head/Head", "options":
+   [{"id": 987431, "name": "Team2"}, {"id": 987432, "name": "Team1"}]}`,
+   decimal odds 3.85 / 1.22 -- a genuine two-named-driver, two-way market.
+   The same call for league 1378715 (Constructors Season H2H) returned the
+   same market/option ids and shape with `participants`
+   `["McLaren", "Ferrari"]`, odds 1.25 / 3.6. Both confirm the "Team1"/
+   "Team2" option labels line up positionally with `participants[0]`/`[1]`
+   the same way every other sport's "1"/"2" labels do (label-driven lookup,
+   not id-order), so `OUTCOME_LABEL_TO_FIELD` gained "Team1" ->
+   `home_odds` / "Team2" -> `away_odds` entries alongside the existing "1"/
+   "X"/"2" ones rather than a sport-specific parsing branch.
+
+So motorsport *is* in scope here, but narrowly and differently from every
+prior sport: not the per-race-weekend program (outright-only, out of
+scope, matching the sibling Interbet finding that motorsport there is a
+single N-way outright with no H2H tab at all -- SupaBets does have one, it
+is just a separate, much smaller product) and not MotoGP/NASCAR (no H2H
+product currently listed at all), but specifically F1's two live "Season
+H2H" propositions (see DEFAULT_MOTORSPORT_LEAGUE_IDS) -- tagged
+`sport="motorsport"`, using MOTORSPORT_SPORT_TYPE_ID = 0,
+MOTORSPORT_ODDS_GROUP_ID = 4325 and MOTORSPORT_MARKET_NAME = "Head/Head".
+This is a thin scope (one pairing per market at discovery time, 2026-09-28)
+that will need widening/replacing over time as SupaBets rotates which
+pairings it offers, the same "scope to what's actually listed" discipline
+as rugby/cricket/tennis/basketball rather than a hand-picked list.
+
 Because the market *name* and *group id* now vary by sport (soccer/rugby
 share "1x2"/1433; cricket is "Winner (incl. super over)"/3764; tennis is
-"Winner"/1583; basketball is "Winner (incl. overT)"/1456), `fetch_raw_odds`
-and `to_odds_events` resolve both per-sport via MARKET_NAME_BY_SPORT /
-ODDS_GROUP_ID_BY_SPORT (keyed off the same `sport` tag used for
-OddsEvent.sport) instead of the single hardcoded constant used before
-cricket existed.
+"Winner"/1583; basketball is "Winner (incl. overT)"/1456; motorsport is
+"Head/Head"/4325), `fetch_raw_odds` and `to_odds_events` resolve both
+per-sport via MARKET_NAME_BY_SPORT / ODDS_GROUP_ID_BY_SPORT (keyed off the
+same `sport` tag used for OddsEvent.sport) instead of the single hardcoded
+constant used before cricket existed.
 """
 
 import asyncio
@@ -282,6 +368,15 @@ TENNIS_SPORT_TYPE_ID = 4
 # EventsProgram/sports-full. See module docstring.
 BASKETBALL_SPORT_TYPE_ID = 2
 
+# Motorsport's sportTypeId, per EventsProgram/sports-full -- shared as 0
+# across both "Motor Car Racing" (sportId 237, the per-race-weekend
+# program) and "Motor Car Outrights" (sportId 256, where the Season H2H
+# markets used here live), and also shared with a few unrelated sports on
+# this platform (MMA, Floorball). Confirmed harmless for the matches
+# endpoint: the league/event id, not this sportTypeId, is what actually
+# selects the right data (verified live). See module docstring.
+MOTORSPORT_SPORT_TYPE_ID = 0
+
 # "1x2" (moneyline) market group id, confirmed constant across leagues by
 # checking /api/frontend/events/{leagueId}/categories-and-odds-groups for
 # both Premier League (990625) and LaLiga (990618) -- both returned
@@ -320,17 +415,30 @@ TENNIS_MARKET_NAME = "Winner"
 BASKETBALL_ODDS_GROUP_ID = 1456
 BASKETBALL_MARKET_NAME = "Winner (incl. overT)"
 
+# Motorsport's (F1) genuine 2-way market, confirmed via
+# categories-and-odds-groups for both live "Season H2H" events (drivers'
+# and constructors') -- idGruppoQuota 4325, gruppoQuota "Head/Head",
+# "righe": 1 / "colonne": 2 (one row, two columns: a true 2-way market, not
+# the "Final Result" N-row/one-column outright field every other motorsport
+# event on this platform reports instead). See module docstring for why
+# only this narrow F1 product qualifies, not the per-race-weekend program
+# or MotoGP/NASCAR.
+MOTORSPORT_ODDS_GROUP_ID = 4325
+MOTORSPORT_MARKET_NAME = "Head/Head"
+
 # Per-sport lookup for the oddsGroupId to request and the markets[].name to
 # match on when parsing -- soccer and rugby share the platform-wide
-# "1x2"/1433 pair, cricket, tennis and basketball each have their own (see
-# module docstring). Keyed off the same `sport` tag fetch_raw_odds attaches
-# to each league and to_odds_events reads back off the payload.
+# "1x2"/1433 pair, cricket, tennis, basketball and motorsport each have
+# their own (see module docstring). Keyed off the same `sport` tag
+# fetch_raw_odds attaches to each league and to_odds_events reads back off
+# the payload.
 ODDS_GROUP_ID_BY_SPORT: dict[str, int] = {
     "soccer": ONE_X_TWO_ODDS_GROUP_ID,
     "rugby": ONE_X_TWO_ODDS_GROUP_ID,
     "cricket": CRICKET_ODDS_GROUP_ID,
     "tennis": TENNIS_ODDS_GROUP_ID,
     "basketball": BASKETBALL_ODDS_GROUP_ID,
+    "motorsport": MOTORSPORT_ODDS_GROUP_ID,
 }
 MARKET_NAME_BY_SPORT: dict[str, str] = {
     "soccer": ONE_X_TWO_MARKET_NAME,
@@ -338,18 +446,31 @@ MARKET_NAME_BY_SPORT: dict[str, str] = {
     "cricket": CRICKET_MARKET_NAME,
     "tennis": TENNIS_MARKET_NAME,
     "basketball": BASKETBALL_MARKET_NAME,
+    "motorsport": MOTORSPORT_MARKET_NAME,
 }
 
 # Outcome label -> universal market field, from the response's own
-# `markets[].options[].name` legend ("1"/"X"/"2"), not inferred from
-# outcome-id ordering. Cricket's live payloads only ever carry "1"/"2" (no
-# "X") since every currently-live competition is limited-overs (T20/ODI),
-# where a drawn result isn't possible -- draw_odds simply stays unset for
-# those events, the same already-optional handling rugby's rare-but-present
-# draw slot exercises the other direction. Tennis's payloads are always
-# "1"/"2" only too, structurally rather than incidentally -- a tennis match
-# has no drawn result at all. See module docstring.
-OUTCOME_LABEL_TO_FIELD = {"1": "home_odds", "X": "draw_odds", "2": "away_odds"}
+# `markets[].options[].name` legend ("1"/"X"/"2", or motorsport's
+# "Team1"/"Team2"), not inferred from outcome-id ordering. Cricket's live
+# payloads only ever carry "1"/"2" (no "X") since every currently-live
+# competition is limited-overs (T20/ODI), where a drawn result isn't
+# possible -- draw_odds simply stays unset for those events, the same
+# already-optional handling rugby's rare-but-present draw slot exercises
+# the other direction. Tennis's payloads are always "1"/"2" only too,
+# structurally rather than incidentally -- a tennis match has no drawn
+# result at all. Motorsport's "Head/Head" group instead labels its two
+# options "Team1"/"Team2" (verified live for both the drivers' and
+# constructors' Season H2H events) -- confirmed to line up positionally
+# with participants[0]/[1] the same way "1"/"2" does for every other sport,
+# so no drawn result either (no "Team1"/"Team2" tie slot exists). See
+# module docstring.
+OUTCOME_LABEL_TO_FIELD = {
+    "1": "home_odds",
+    "X": "draw_odds",
+    "2": "away_odds",
+    "Team1": "home_odds",
+    "Team2": "away_odds",
+}
 
 # Soccer competition eventIds (from /api/b2c/EventsProgram/program?sportId=163
 # aka /api/frontend/events/program), name is cosmetic fallback only -- the
@@ -494,6 +615,22 @@ DEFAULT_BASKETBALL_LEAGUE_IDS: dict[int, str] = {
     990615: "WNBA",
 }
 
+# Motorsport (F1) H2H eventIds (from
+# /api/b2c/EventsProgram/program?sportId=256, "Motor Car Outrights"), same
+# discovery path as every other sport's default league lists. Unlike the
+# other sports' lists, each "league" here is a single standing market slot
+# offering exactly one live named-pair proposition at a time (subEventsCount
+# 1 each) rather than a competition with many matches -- this is the
+# *entire* live Season H2H product on the platform (the per-race-weekend
+# program and MotoGP/NASCAR expose no H2H market at all; see module
+# docstring). Expected to need replacing over time as SupaBets rotates which
+# pairing it offers, same as tennis's tournament list going stale faster
+# than soccer/rugby/cricket's.
+DEFAULT_MOTORSPORT_LEAGUE_IDS: dict[int, str] = {
+    1320917: "Drivers Championship 2026 - Season H2H",
+    1378715: "Constructors Championship - Season H2H",
+}
+
 # Plain, fixed-interval polling -- same cadence as a normal page refresh,
 # not randomized or disguised to look human.
 DEFAULT_POLL_INTERVAL_SECONDS = 45
@@ -510,22 +647,25 @@ class SupaBetsScraper(BaseScraper):
         cricket_league_ids: dict[int, str] | None = None,
         tennis_league_ids: dict[int, str] | None = None,
         basketball_league_ids: dict[int, str] | None = None,
+        motorsport_league_ids: dict[int, str] | None = None,
     ):
         """`league_ids`/`sport_type_id` are the original soccer-only
         constructor params and keep their original meaning: passing
         `league_ids` explicitly scopes this scraper to *just* that single
         sport (soccer by default, or whichever `sport_type_id` is given),
-        the same override behavior as before rugby/cricket/tennis/basketball
-        support existed -- it does not also implicitly pull in rugby,
-        cricket, tennis or basketball.
+        the same override behavior as before rugby/cricket/tennis/
+        basketball/motorsport support existed -- it does not also
+        implicitly pull in rugby, cricket, tennis, basketball or
+        motorsport.
 
         Leave `league_ids`, `rugby_league_ids`, `cricket_league_ids`,
-        `tennis_league_ids` and `basketball_league_ids` all unset (the
-        default) to get the additive behavior: soccer's, rugby's, cricket's,
-        tennis's and basketball's default league lists polled together every
-        cycle. Pass `rugby_league_ids`/`cricket_league_ids`/
-        `tennis_league_ids`/`basketball_league_ids` to widen or narrow that
-        sport's scope the same way `league_ids` does for soccer.
+        `tennis_league_ids`, `basketball_league_ids` and
+        `motorsport_league_ids` all unset (the default) to get the additive
+        behavior: soccer's, rugby's, cricket's, tennis's, basketball's and
+        motorsport's default league lists polled together every cycle. Pass
+        `rugby_league_ids`/`cricket_league_ids`/`tennis_league_ids`/
+        `basketball_league_ids`/`motorsport_league_ids` to widen or narrow
+        that sport's scope the same way `league_ids` does for soccer.
         """
         self.league_ids = league_ids if league_ids is not None else dict(DEFAULT_LEAGUE_IDS)
         self.sport_type_id = sport_type_id
@@ -540,6 +680,8 @@ class SupaBetsScraper(BaseScraper):
                 sport_name = "tennis"
             elif sport_type_id == BASKETBALL_SPORT_TYPE_ID:
                 sport_name = "basketball"
+            elif sport_type_id == MOTORSPORT_SPORT_TYPE_ID:
+                sport_name = "motorsport"
             else:
                 sport_name = "soccer"
             self._sport_scopes: list[tuple[int, str, dict[int, str]]] = [
@@ -570,6 +712,13 @@ class SupaBetsScraper(BaseScraper):
                     if basketball_league_ids is not None
                     else dict(DEFAULT_BASKETBALL_LEAGUE_IDS),
                 ),
+                (
+                    MOTORSPORT_SPORT_TYPE_ID,
+                    "motorsport",
+                    motorsport_league_ids
+                    if motorsport_league_ids is not None
+                    else dict(DEFAULT_MOTORSPORT_LEAGUE_IDS),
+                ),
             ]
 
         self._client = httpx.AsyncClient(timeout=10, headers=API_KEY_HEADER)
@@ -577,21 +726,21 @@ class SupaBetsScraper(BaseScraper):
     async def fetch_raw_odds(self) -> dict:
         """Fetches the nearest-matchday odds for each configured league,
         across every configured sport (soccer and, by default, rugby,
-        cricket, tennis and basketball).
+        cricket, tennis, basketball and motorsport).
 
         Unlike Betway ZA/WSB's single bulk call, SupaBets has no "all
         matches" endpoint -- each league is its own HTTP request. A single
         league's request failing (transient network blip, that one
         competition temporarily unavailable) is caught and logged here
         rather than aborting the whole poll cycle: the other leagues'
-        odds -- soccer, rugby, cricket, tennis or basketball -- are still
-        worth publishing that cycle.
+        odds -- soccer, rugby, cricket, tennis, basketball or motorsport --
+        are still worth publishing that cycle.
 
         The oddsGroupId requested is resolved per sport (via
         ODDS_GROUP_ID_BY_SPORT) rather than a single hardcoded constant --
-        cricket's, tennis's and basketball's moneyline-equivalent markets
-        each live under their own group id, distinct from soccer/rugby's
-        shared 1433 (see module docstring).
+        cricket's, tennis's, basketball's and motorsport's moneyline-
+        equivalent markets each live under their own group id, distinct
+        from soccer/rugby's shared 1433 (see module docstring).
         """
         leagues_raw: dict[str, dict] = {}
         for sport_type_id, sport_name, league_ids in self._sport_scopes:
@@ -631,21 +780,23 @@ class SupaBetsScraper(BaseScraper):
         parallel events/markets/outcomes/prices arrays. Outcome labels
         ("1"/"X"/"2", or just "1"/"2" for cricket's currently-live
         limited-overs matches, for tennis, which has no drawn result at all,
-        and for basketball's "Winner (incl. overT)" group, which excludes
-        the pre-overtime tie state by construction) come from the payload's
-        own `markets[].options[]` legend, not inferred from outcome-id sort
+        for basketball's "Winner (incl. overT)" group, which excludes
+        the pre-overtime tie state by construction, or "Team1"/"Team2" for
+        motorsport's "Head/Head" group) come from the payload's own
+        `markets[].options[]` legend, not inferred from outcome-id sort
         order. Rugby's odds payloads use this exact same shape and
         market/label legend as soccer's (verified live for all of
         DEFAULT_RUGBY_LEAGUE_IDS -- see module docstring), so no
         sport-specific parsing branch is needed for rugby, only the `sport`
-        tag on the resulting OddsEvent. Cricket's, tennis's and
-        basketball's payloads use the same shape too, but each with its own
-        market name/id (see MARKET_NAME_BY_SPORT and the module docstring)
-        -- resolved here per-sport rather than assumed. Tennis's
+        tag on the resulting OddsEvent. Cricket's, tennis's, basketball's
+        and motorsport's payloads use the same shape too, but each with its
+        own market name/id (see MARKET_NAME_BY_SPORT and the module
+        docstring) -- resolved here per-sport rather than assumed. Tennis's
         `participants` entries (one per side, singles or doubles alike -- a
         doubles entry's `name` is the pair as one string, e.g. "Cash R /
         Erler A") also fit the existing two-participant join without any
-        sport-specific branching.
+        sport-specific branching, and motorsport's two named-driver/
+        constructor `participants` entries fit it the same way.
 
         Note event_id (the OddsEvent field) is left unset here -- that's
         the engine's job downstream (see the note on OddsEvent.event_id in
