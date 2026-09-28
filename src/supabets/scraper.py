@@ -95,6 +95,56 @@ Because rugby reuses the exact same matches-endpoint shape, market id, and
 "1"/"X"/"2" label legend as soccer, `to_odds_events` below is unchanged
 except for tagging each parsed event with the sport it actually came from
 (read off the raw payload, not hardcoded) instead of assuming soccer.
+
+Cricket was added the same way, but its moneyline market turned out to be
+genuinely different from soccer/rugby's shared "1x2"/1433 -- verified rather
+than assumed, per the discovery discipline above:
+
+1. `/api/b2c/EventsProgram/sports-full` lists `{"sportId": 193,
+   "sportTypeId": 9, "name": "Cricket", "slug": "cricket",
+   "subEventsCount": 14}` -- cricket's `sportTypeId` for the matches
+   endpoint is 9 (distinct from its sportId, 193).
+2. `/api/b2c/EventsProgram/program?sportId=193` lists the full live cricket
+   program: 5 competitions totalling exactly 14 subEvents (matching
+   sports-full's count for sportId 193 precisely) -- T20 South Africa Cup
+   (1009161, 7 matches), ODI Series South Africa vs Australia (1539799),
+   ODI Series India vs. West Indies (1539912), T20 Asian Games (1542020, 2
+   matches) and National Cricket League, Women (1054464, 3 matches). No
+   Test-match series was live in the program at discovery time
+   (2026-09-28), same "scope to what's actually listed" discipline as
+   rugby -- see DEFAULT_CRICKET_LEAGUE_IDS.
+3. `/api/frontend/events/{leagueId}/categories-and-odds-groups`, checked
+   for all five of the above, did **not** reuse soccer/rugby's 1433/"1x2"
+   group at all -- cricket's only moneyline-shaped group is idGruppoQuota
+   3764, `gruppoQuota` "Winner (incl. super over)". So, unlike rugby,
+   cricket needed its own oddsGroupId (CRICKET_ODDS_GROUP_ID = 3764) and
+   its own market name to match on (CRICKET_MARKET_NAME = "Winner (incl.
+   super over)", not "1x2") -- confirming this platform's market ids/names
+   are not universally shared across sports, so each new sport must still
+   be checked rather than assumed to inherit 1433/"1x2".
+4. A plain curl of
+   `/api/frontend/matches/9/section/leagues?n=1&league=<id>&oddsGroupId=3764`
+   for all five leagues (just the `x-api-key` header, no cookies/session)
+   returned 200s with real matches and live decimal odds. The market shape
+   is **2-way only** in every sampled match (`markets[0].options` is just
+   `[{"id": 986175, "name": "1"}, {"id": 986176, "name": "2"}]`, no "X"/draw
+   slot at all) -- consistent with all five live competitions being
+   limited-overs cricket (T20/ODI), where a match-winner draw isn't a
+   possible result the way it is in Test cricket (not currently live on
+   this platform). The existing outcome-label-driven mapping and
+   already-optional `draw_odds` handle this shape natively: `home_odds`/
+   `away_odds` get populated from labels "1"/"2", `draw_odds` simply never
+   gets set because no "X"-labelled option exists in the payload's own
+   `markets[].options[]` legend -- no new market-shape branching was
+   needed, matching the module's existing "verify, don't force a
+   structure" approach.
+
+Because the market *name* and *group id* now vary by sport (soccer/rugby
+share "1x2"/1433; cricket is "Winner (incl. super over)"/3764),
+`fetch_raw_odds` and `to_odds_events` resolve both per-sport via
+MARKET_NAME_BY_SPORT / ODDS_GROUP_ID_BY_SPORT (keyed off the same `sport`
+tag used for OddsEvent.sport) instead of the single hardcoded constant used
+before cricket existed.
 """
 
 import asyncio
@@ -123,16 +173,51 @@ SOCCER_SPORT_TYPE_ID = 1
 # 14); see module docstring.
 RUGBY_SPORT_TYPE_ID = 14
 
+# Cricket's sportTypeId (distinct from its sportId, 193) -- found the same
+# way as soccer's/rugby's, via EventsProgram/sports-full. See module
+# docstring.
+CRICKET_SPORT_TYPE_ID = 9
+
 # "1x2" (moneyline) market group id, confirmed constant across leagues by
 # checking /api/frontend/events/{leagueId}/categories-and-odds-groups for
 # both Premier League (990625) and LaLiga (990618) -- both returned
-# idGruppoQuota 1433 for gruppoQuota "1x2".
+# idGruppoQuota 1433 for gruppoQuota "1x2". Also confirmed to be what rugby
+# reuses (see module docstring), but NOT what cricket uses -- cricket has
+# its own group/name below.
 ONE_X_TWO_ODDS_GROUP_ID = 1433
 ONE_X_TWO_MARKET_NAME = "1x2"
 
+# Cricket's moneyline-equivalent market group, confirmed via
+# categories-and-odds-groups for all of DEFAULT_CRICKET_LEAGUE_IDS -- this
+# platform does NOT reuse 1433/"1x2" for cricket the way it does for rugby;
+# cricket's only match-winner-shaped group is idGruppoQuota 3764 named
+# "Winner (incl. super over)". See module docstring.
+CRICKET_ODDS_GROUP_ID = 3764
+CRICKET_MARKET_NAME = "Winner (incl. super over)"
+
+# Per-sport lookup for the oddsGroupId to request and the markets[].name to
+# match on when parsing -- soccer and rugby share the platform-wide
+# "1x2"/1433 pair, cricket does not (see module docstring). Keyed off the
+# same `sport` tag fetch_raw_odds attaches to each league and
+# to_odds_events reads back off the payload.
+ODDS_GROUP_ID_BY_SPORT: dict[str, int] = {
+    "soccer": ONE_X_TWO_ODDS_GROUP_ID,
+    "rugby": ONE_X_TWO_ODDS_GROUP_ID,
+    "cricket": CRICKET_ODDS_GROUP_ID,
+}
+MARKET_NAME_BY_SPORT: dict[str, str] = {
+    "soccer": ONE_X_TWO_MARKET_NAME,
+    "rugby": ONE_X_TWO_MARKET_NAME,
+    "cricket": CRICKET_MARKET_NAME,
+}
+
 # Outcome label -> universal market field, from the response's own
 # `markets[].options[].name` legend ("1"/"X"/"2"), not inferred from
-# outcome-id ordering.
+# outcome-id ordering. Cricket's live payloads only ever carry "1"/"2" (no
+# "X") since every currently-live competition is limited-overs (T20/ODI),
+# where a drawn result isn't possible -- draw_odds simply stays unset for
+# those events, the same already-optional handling rugby's rare-but-present
+# draw slot exercises the other direction. See module docstring.
 OUTCOME_LABEL_TO_FIELD = {"1": "home_odds", "X": "draw_odds", "2": "away_odds"}
 
 # Soccer competition eventIds (from /api/b2c/EventsProgram/program?sportId=163
@@ -166,6 +251,21 @@ DEFAULT_RUGBY_LEAGUE_IDS: dict[int, str] = {
     991109: "NRL, Women",
 }
 
+# Cricket competition eventIds (from /api/b2c/EventsProgram/program?sportId=193),
+# same discovery path as soccer's/rugby's default league lists. This is the
+# *entire* live cricket program on the platform (5 competitions summing to
+# exactly 14 subEvents, matching sports-full's count for sportId 193) -- not
+# a narrowed-down subset, since cricket's whole program here is already
+# small. See module docstring for why no Test-match series ids are included
+# (not listed as live at discovery time).
+DEFAULT_CRICKET_LEAGUE_IDS: dict[int, str] = {
+    1009161: "T20 South Africa Cup",
+    1539799: "ODI Series South Africa vs Australia",
+    1539912: "ODI Series India vs. West Indies",
+    1542020: "T20 Asian Games",
+    1054464: "National Cricket League, Women",
+}
+
 # Plain, fixed-interval polling -- same cadence as a normal page refresh,
 # not randomized or disguised to look human.
 DEFAULT_POLL_INTERVAL_SECONDS = 45
@@ -179,25 +279,33 @@ class SupaBetsScraper(BaseScraper):
         league_ids: dict[int, str] | None = None,
         sport_type_id: int = SOCCER_SPORT_TYPE_ID,
         rugby_league_ids: dict[int, str] | None = None,
+        cricket_league_ids: dict[int, str] | None = None,
     ):
         """`league_ids`/`sport_type_id` are the original soccer-only
         constructor params and keep their original meaning: passing
         `league_ids` explicitly scopes this scraper to *just* that single
         sport (soccer by default, or whichever `sport_type_id` is given),
-        the same override behavior as before rugby support existed -- it
-        does not also implicitly pull in rugby.
+        the same override behavior as before rugby/cricket support existed
+        -- it does not also implicitly pull in rugby or cricket.
 
-        Leave both `league_ids` and `rugby_league_ids` unset (the default)
-        to get the additive behavior: soccer's and rugby's default league
-        lists polled together every cycle. Pass `rugby_league_ids` to widen
-        or narrow rugby's scope the same way `league_ids` does for soccer.
+        Leave `league_ids`, `rugby_league_ids` and `cricket_league_ids` all
+        unset (the default) to get the additive behavior: soccer's,
+        rugby's and cricket's default league lists polled together every
+        cycle. Pass `rugby_league_ids`/`cricket_league_ids` to widen or
+        narrow that sport's scope the same way `league_ids` does for
+        soccer.
         """
         self.league_ids = league_ids if league_ids is not None else dict(DEFAULT_LEAGUE_IDS)
         self.sport_type_id = sport_type_id
 
         if league_ids is not None:
             # Explicit legacy override: single sport, exactly as specified.
-            sport_name = "rugby" if sport_type_id == RUGBY_SPORT_TYPE_ID else "soccer"
+            if sport_type_id == RUGBY_SPORT_TYPE_ID:
+                sport_name = "rugby"
+            elif sport_type_id == CRICKET_SPORT_TYPE_ID:
+                sport_name = "cricket"
+            else:
+                sport_name = "soccer"
             self._sport_scopes: list[tuple[int, str, dict[int, str]]] = [
                 (sport_type_id, sport_name, self.league_ids)
             ]
@@ -209,28 +317,41 @@ class SupaBetsScraper(BaseScraper):
                     "rugby",
                     rugby_league_ids if rugby_league_ids is not None else dict(DEFAULT_RUGBY_LEAGUE_IDS),
                 ),
+                (
+                    CRICKET_SPORT_TYPE_ID,
+                    "cricket",
+                    cricket_league_ids if cricket_league_ids is not None else dict(DEFAULT_CRICKET_LEAGUE_IDS),
+                ),
             ]
 
         self._client = httpx.AsyncClient(timeout=10, headers=API_KEY_HEADER)
 
     async def fetch_raw_odds(self) -> dict:
         """Fetches the nearest-matchday odds for each configured league,
-        across every configured sport (soccer and, by default, rugby).
+        across every configured sport (soccer and, by default, rugby and
+        cricket).
 
         Unlike Betway ZA/WSB's single bulk call, SupaBets has no "all
         matches" endpoint -- each league is its own HTTP request. A single
         league's request failing (transient network blip, that one
         competition temporarily unavailable) is caught and logged here
         rather than aborting the whole poll cycle: the other leagues'
-        odds -- soccer or rugby -- are still worth publishing that cycle.
+        odds -- soccer, rugby or cricket -- are still worth publishing that
+        cycle.
+
+        The oddsGroupId requested is resolved per sport (via
+        ODDS_GROUP_ID_BY_SPORT) rather than a single hardcoded constant --
+        cricket's moneyline-equivalent market lives under a different group
+        id than soccer/rugby's shared 1433 (see module docstring).
         """
         leagues_raw: dict[str, dict] = {}
         for sport_type_id, sport_name, league_ids in self._sport_scopes:
+            odds_group_id = ODDS_GROUP_ID_BY_SPORT.get(sport_name, ONE_X_TWO_ODDS_GROUP_ID)
             for league_id, league_name in league_ids.items():
                 try:
                     response = await self._client.get(
                         SUPABETS_MATCHES_URL_TEMPLATE.format(sport_type_id=sport_type_id),
-                        params={"n": 1, "league": league_id, "oddsGroupId": ONE_X_TWO_ODDS_GROUP_ID},
+                        params={"n": 1, "league": league_id, "oddsGroupId": odds_group_id},
                     )
                     response.raise_for_status()
                     leagues_raw[str(league_id)] = {
@@ -252,19 +373,24 @@ class SupaBetsScraper(BaseScraper):
 
     def to_odds_events(self, raw: dict) -> list[OddsEvent]:
         """Maps SupaBets' per-league matches+odds payload onto the universal
-        OddsEvent schema, moneyline ("1x2") market only for now.
+        OddsEvent schema, moneyline-equivalent market only for now.
 
         Each league payload has matches nested under day buckets
         (`events[].matches[]`) and prices in a separate top-level `odds`
         dict keyed by match id -> oddsTypeId -> outcomeId -> handicap ->
         {id, value} -- joined here the same way Betway ZA joins its
         parallel events/markets/outcomes/prices arrays. Outcome labels
-        ("1"/"X"/"2") come from the payload's own `markets[].options[]`
-        legend, not inferred from outcome-id sort order. Rugby's odds
-        payloads use this exact same shape and market/label legend as
-        soccer's (verified live for all of DEFAULT_RUGBY_LEAGUE_IDS -- see
-        module docstring), so no sport-specific parsing branch is needed
-        here, only the `sport` tag on the resulting OddsEvent.
+        ("1"/"X"/"2", or just "1"/"2" for cricket's currently-live
+        limited-overs matches) come from the payload's own
+        `markets[].options[]` legend, not inferred from outcome-id sort
+        order. Rugby's odds payloads use this exact same shape and
+        market/label legend as soccer's (verified live for all of
+        DEFAULT_RUGBY_LEAGUE_IDS -- see module docstring), so no
+        sport-specific parsing branch is needed for rugby, only the `sport`
+        tag on the resulting OddsEvent. Cricket's payloads use the same
+        shape too, but a different market name/id (see MARKET_NAME_BY_SPORT
+        and the module docstring) -- resolved here per-sport rather than
+        assumed.
 
         Note event_id (the OddsEvent field) is left unset here -- that's
         the engine's job downstream (see the note on OddsEvent.event_id in
@@ -277,9 +403,10 @@ class SupaBetsScraper(BaseScraper):
             payload = league_data.get("payload") or {}
             league_name = league_data.get("league_name", "unknown")
             # Defaults to "soccer" for back-compat with raw payloads built
-            # before rugby support existed (and by any caller/test that
-            # constructs a leagues dict without a "sport" key).
+            # before rugby/cricket support existed (and by any caller/test
+            # that constructs a leagues dict without a "sport" key).
             sport = league_data.get("sport", "soccer")
+            market_name = MARKET_NAME_BY_SPORT.get(sport, ONE_X_TWO_MARKET_NAME)
 
             # Every step below is defensive against a single malformed
             # record (a match/market/odds entry missing an expected field):
@@ -288,7 +415,7 @@ class SupaBetsScraper(BaseScraper):
 
             try:
                 market_def = next(
-                    (m for m in payload.get("markets", []) if m.get("name") == ONE_X_TWO_MARKET_NAME), None
+                    (m for m in payload.get("markets", []) if m.get("name") == market_name), None
                 )
                 if market_def is None:
                     continue

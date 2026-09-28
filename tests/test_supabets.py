@@ -164,6 +164,93 @@ SAMPLE_RUGBY_RAW_PAYLOAD = {
     }
 }
 
+# Shape captured from a real, plain GET (x-api-key header only, no session/
+# cookies) to SupaBets' public matches endpoint for cricket:
+#   GET https://apib2c.supabets.co.za/api/frontend/matches/9/section/leagues
+#       ?n=1&league=1009161&oddsGroupId=3764
+# (9 = cricket's sportTypeId, 1009161 = T20 South Africa Cup's eventId, 3764
+# = cricket's own "Winner (incl. super over)" market group id -- NOT
+# soccer/rugby's shared 1433/"1x2"; verified via
+# /api/frontend/events/1009161/categories-and-odds-groups that 1433 isn't
+# even offered for cricket. See scraper.py's docstring for how cricket's
+# ids were found). Trimmed to two matches' worth of records; field names,
+# ids and decimal odds unchanged from the real response. Note cricket's
+# market uses different market/outcome ids than soccer/rugby's (87955 /
+# 986175-986176, vs. 79117 / 911679-911681) and only ever carries a "1"/"2"
+# legend (no "X") in the real capture -- every currently-live competition on
+# the platform is limited-overs (T20/ODI), where a draw isn't a possible
+# match result the way it is in Test cricket.
+SAMPLE_CRICKET_MATCHES_PAYLOAD = {
+    "events": [
+        {
+            "id": "639262368000000000",
+            "name": "Tomorrow",
+            "matchCount": 3,
+            "order": 0,
+            "sportType": None,
+            "matches": [
+                {
+                    "id": 204329261,
+                    "eventName": "T20 South Africa Cup",
+                    "participants": [{"name": "South Africa Emerging"}, {"name": "Tuskers"}],
+                    "slug": "spa/sport/cricket/south-africa/t20-south-africa-cup/204329261-south-africa-emerging-tuskers",
+                    "start": "2026-09-29T11:00:00Z",
+                    "statisticsCode": "74293256",
+                    "oddsCount": 2,
+                    "odds": None,
+                },
+                {
+                    "id": 203903340,
+                    "eventName": "T20 South Africa Cup",
+                    "participants": [{"name": "Warriors"}, {"name": "Limpopo"}],
+                    "slug": "spa/sport/cricket/south-africa/t20-south-africa-cup/203903340-warriors-limpopo",
+                    "start": "2026-09-29T12:00:00Z",
+                    "statisticsCode": "74293204",
+                    "oddsCount": 2,
+                    "odds": None,
+                },
+            ],
+        },
+        {"id": "639263232000000000", "name": "30 September 2026", "matchCount": 2, "order": 1, "sportType": None},
+    ],
+    "odds": {
+        "204329261": {
+            "87955": {
+                "986175": {"0.00": {"id": "2c2bebae9", "value": 2.11}},
+                "986176": {"0.00": {"id": "2c2bebaea", "value": 1.7}},
+            }
+        },
+        "203903340": {
+            "87955": {
+                "986175": {"0.00": {"id": "2c31de676", "value": 1.17}},
+                "986176": {"0.00": {"id": "2c31de677", "value": 4.85}},
+            }
+        },
+    },
+    "markets": [
+        {
+            "id": 87955,
+            "name": "Winner (incl. super over)",
+            "options": [
+                {"id": 986175, "name": "1"},
+                {"id": 986176, "name": "2"},
+            ],
+            "hndValue": 0.0,
+            "oddsClassId": 87955,
+        }
+    ],
+}
+
+SAMPLE_CRICKET_RAW_PAYLOAD = {
+    "leagues": {
+        "1009161": {
+            "league_name": "T20 South Africa Cup",
+            "payload": SAMPLE_CRICKET_MATCHES_PAYLOAD,
+            "sport": "cricket",
+        }
+    }
+}
+
 
 def test_to_odds_events_joins_events_odds_and_markets_legend():
     scraper = SupaBetsScraper()
@@ -283,6 +370,82 @@ def test_to_odds_events_maps_rugby_outcome_labels_not_id_order():
     assert market.draw_odds == 1.53
     # outcome 911680 (value 21.0) is now labelled "2" -> away
     assert market.away_odds == 21.0
+
+
+def test_to_odds_events_tags_cricket_events_with_sport_cricket():
+    """Cricket league payloads carry an explicit "sport": "cricket" tag (set
+    by fetch_raw_odds) -- to_odds_events must read it off the raw payload
+    and, crucially, use it to look up cricket's own market name ("Winner
+    (incl. super over)", not "1x2") rather than the soccer/rugby default."""
+    scraper = SupaBetsScraper()
+
+    events = scraper.to_odds_events(SAMPLE_CRICKET_RAW_PAYLOAD)
+
+    assert len(events) == 2
+    emerging_tuskers = next(e for e in events if e.home_team == "South Africa Emerging")
+    assert emerging_tuskers.away_team == "Tuskers"
+    assert emerging_tuskers.sport == "cricket"
+    assert emerging_tuskers.league == "T20 South Africa Cup"
+    assert emerging_tuskers.bookmaker == "supabets"
+    assert emerging_tuskers.markets["moneyline"].home_odds == 2.11
+    assert emerging_tuskers.markets["moneyline"].away_odds == 1.7
+    assert all(e.sport == "cricket" for e in events)
+
+
+def test_to_odds_events_cricket_market_is_two_way_no_draw():
+    """Cricket's real, currently-live matches (all limited-overs: T20/ODI)
+    only ever offer a "1"/"2" outcome legend -- no "X"/draw slot at all,
+    unlike rugby which does carry a rare-but-priced draw. The existing
+    optional-draw_odds handling must publish a complete moneyline market
+    from just home/away without requiring a draw price."""
+    scraper = SupaBetsScraper()
+
+    events = scraper.to_odds_events(SAMPLE_CRICKET_RAW_PAYLOAD)
+
+    assert len(events) == 2
+    for event in events:
+        assert event.markets["moneyline"].home_odds is not None
+        assert event.markets["moneyline"].away_odds is not None
+        assert event.markets["moneyline"].draw_odds is None
+
+
+def test_to_odds_events_maps_cricket_outcome_labels_not_id_order():
+    """Same explicit-label-not-id-order guarantee soccer/rugby have,
+    verified against cricket's own market/outcome ids (87955 /
+    986175-986176, distinct from soccer/rugby's 79117 / 911679-911681)."""
+    payload = {
+        **SAMPLE_CRICKET_MATCHES_PAYLOAD,
+        "odds": {
+            "204329261": SAMPLE_CRICKET_MATCHES_PAYLOAD["odds"]["204329261"],
+        },
+        "markets": [
+            {
+                "id": 87955,
+                "name": "Winner (incl. super over)",
+                # Deliberately swapped ids relative to the real capture, to
+                # prove label lookup drives the mapping rather than id
+                # ordering.
+                "options": [
+                    {"id": 986176, "name": "1"},
+                    {"id": 986175, "name": "2"},
+                ],
+                "hndValue": 0.0,
+                "oddsClassId": 87955,
+            }
+        ],
+    }
+    raw = {"leagues": {"1009161": {"league_name": "T20 South Africa Cup", "payload": payload, "sport": "cricket"}}}
+    scraper = SupaBetsScraper()
+
+    events = scraper.to_odds_events(raw)
+
+    assert len(events) == 1
+    market = events[0].markets["moneyline"]
+    # outcome 986176 (value 1.7) is now labelled "1" -> home
+    assert market.home_odds == 1.7
+    # outcome 986175 (value 2.11) is now labelled "2" -> away
+    assert market.away_odds == 2.11
+    assert market.draw_odds is None
 
 
 def test_to_odds_events_skips_league_missing_1x2_market_definition():
@@ -465,11 +628,11 @@ async def test_poll_continues_past_a_transient_fetch_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fetch_raw_odds_polls_soccer_and_rugby_together_by_default(monkeypatch):
-    """Default construction (no league_ids/rugby_league_ids override) must
-    poll both soccer's and rugby's default league lists additively -- the
-    core ask of adding rugby support -- and tag each league with the sport
-    it actually came from."""
+async def test_fetch_raw_odds_polls_soccer_rugby_and_cricket_together_by_default(monkeypatch):
+    """Default construction (no league_ids/rugby_league_ids/
+    cricket_league_ids override) must poll soccer's, rugby's and cricket's
+    default league lists additively -- the core ask of adding cricket
+    support -- and tag each league with the sport it actually came from."""
     scraper = SupaBetsScraper()
 
     class FakeResponse:
@@ -492,20 +655,61 @@ async def test_fetch_raw_odds_polls_soccer_and_rugby_together_by_default(monkeyp
 
     raw = await scraper.fetch_raw_odds()
 
-    from supabets.scraper import DEFAULT_LEAGUE_IDS, DEFAULT_RUGBY_LEAGUE_IDS
+    from supabets.scraper import DEFAULT_CRICKET_LEAGUE_IDS, DEFAULT_LEAGUE_IDS, DEFAULT_RUGBY_LEAGUE_IDS
 
-    expected_league_ids = {str(k) for k in {**DEFAULT_LEAGUE_IDS, **DEFAULT_RUGBY_LEAGUE_IDS}}
+    expected_league_ids = {
+        str(k) for k in {**DEFAULT_LEAGUE_IDS, **DEFAULT_RUGBY_LEAGUE_IDS, **DEFAULT_CRICKET_LEAGUE_IDS}
+    }
     assert set(raw["leagues"].keys()) == expected_league_ids
 
     soccer_sports = {raw["leagues"][str(lid)]["sport"] for lid in DEFAULT_LEAGUE_IDS}
     rugby_sports = {raw["leagues"][str(lid)]["sport"] for lid in DEFAULT_RUGBY_LEAGUE_IDS}
+    cricket_sports = {raw["leagues"][str(lid)]["sport"] for lid in DEFAULT_CRICKET_LEAGUE_IDS}
     assert soccer_sports == {"soccer"}
     assert rugby_sports == {"rugby"}
+    assert cricket_sports == {"cricket"}
 
-    # Requests went to both sportTypeId=1 (soccer) and sportTypeId=14 (rugby)
-    # matches endpoints.
+    # Requests went to sportTypeId=1 (soccer), sportTypeId=14 (rugby) and
+    # sportTypeId=9 (cricket) matches endpoints.
     assert any("/matches/1/" in url for url in seen_urls)
     assert any("/matches/14/" in url for url in seen_urls)
+    assert any("/matches/9/" in url for url in seen_urls)
+
+
+@pytest.mark.asyncio
+async def test_fetch_raw_odds_requests_cricket_own_odds_group_id(monkeypatch):
+    """Cricket doesn't reuse soccer/rugby's shared oddsGroupId 1433 -- its
+    own moneyline-equivalent market lives under 3764 ("Winner (incl. super
+    over)"). fetch_raw_odds must request that group id for cricket leagues
+    specifically, not the soccer/rugby default."""
+    scraper = SupaBetsScraper()
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    seen_params_by_sport_type: dict[int, list] = {}
+
+    async def fake_get(url, params=None):
+        sport_type_id = int(url.rsplit("/matches/", 1)[1].split("/")[0])
+        seen_params_by_sport_type.setdefault(sport_type_id, []).append(params)
+        return FakeResponse(SAMPLE_MATCHES_PAYLOAD)
+
+    monkeypatch.setattr(scraper._client, "get", fake_get)
+
+    await scraper.fetch_raw_odds()
+
+    # sportTypeId 9 = cricket
+    assert all(p["oddsGroupId"] == 3764 for p in seen_params_by_sport_type[9])
+    # sportTypeId 1 = soccer, sportTypeId 14 = rugby, both still 1433
+    assert all(p["oddsGroupId"] == 1433 for p in seen_params_by_sport_type[1])
+    assert all(p["oddsGroupId"] == 1433 for p in seen_params_by_sport_type[14])
 
 
 @pytest.mark.asyncio
