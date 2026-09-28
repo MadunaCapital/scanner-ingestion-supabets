@@ -54,6 +54,47 @@ It also only returns matches for the *nearest* match day per league (the
 all return the identical single expanded day), so this adapter is
 "next matchday per major league", not a multi-day-ahead feed the way WSB's
 is. Documented here rather than silently assumed.
+
+Rugby (South Africa's #2 sport after soccer) was added the same way soccer
+was originally scoped:
+
+1. `/api/b2c/EventsProgram/sports-full` (same navigation endpoint used to
+   confirm soccer's sportTypeId) lists `{"sportId": 197, "sportTypeId": 14,
+   "name": "Rugby", "slug": "rugby", "subEventsCount": 30}` -- rugby's
+   `sportTypeId` for the matches endpoint is 14 (distinct from its sportId,
+   197, same relationship as soccer's 1 vs 163). This one sportTypeId lumps
+   *both* rugby codes together on this platform.
+2. `/api/b2c/EventsProgram/program?sportId=197` lists the full live rugby
+   program: 30 subEvents across two groups -- "Rugby League" (NRL
+   Premiership 990812, NRL, Women 991109, Super League 990809) and "Rugby
+   Union" (English Premiership 990802, National Provincial Championship
+   990884, Top 14 990797, United Rugby Championship 990807). No Currie Cup /
+   Rugby Championship / Six Nations test window was live in the program at
+   discovery time (2026-09-28) -- this adapter scopes to what's actually
+   listed rather than guessing at ids for competitions not currently on the
+   board. United Rugby Championship is the most South-Africa-relevant entry
+   here since its ids include the four SA franchises (Bulls, Sharks,
+   Stormers, Lions).
+3. `/api/frontend/events/{leagueId}/categories-and-odds-groups` for all
+   seven of the above returned the *same* `idGruppoQuota` 1433 / `"1x2"`
+   moneyline group as soccer's Premier League/LaLiga check -- oddsGroupId
+   1433 is evidently a platform-wide market id, not soccer-specific, so no
+   separate rugby oddsGroupId was needed.
+4. A plain curl of `/api/frontend/matches/14/section/leagues?n=1&league=<id>&oddsGroupId=1433`
+   for each of the seven leagues (just the `x-api-key` header, no
+   cookies/session) returned 200s with real matches and live decimal odds,
+   in the *same* response shape soccer uses -- down to reusing the same
+   `markets[].id` (79117) and outcome-option ids (911679/911680/911681 for
+   "1"/"X"/"2") observed in the soccer capture. Rugby matches do carry a
+   priced draw outcome (rare but not impossible, e.g. golden-point draws in
+   NRL's regular season) rather than omitting the "X" slot, so no market
+   -shape special-casing was needed beyond what the soccer code already does
+   (draw_odds stays optional; only home/away are required to publish).
+
+Because rugby reuses the exact same matches-endpoint shape, market id, and
+"1"/"X"/"2" label legend as soccer, `to_odds_events` below is unchanged
+except for tagging each parsed event with the sport it actually came from
+(read off the raw payload, not hardcoded) instead of assuming soccer.
 """
 
 import asyncio
@@ -75,6 +116,12 @@ API_KEY_HEADER = {"x-api-key": "H3DigitalAPIB2CWebSiteUser", "Accept": "applicat
 # EventsProgram/sports-full taxonomy endpoint uses) -- required by the
 # matches/section/leagues path.
 SOCCER_SPORT_TYPE_ID = 1
+
+# Rugby's sportTypeId (distinct from its sportId, 197) -- found the same way
+# as soccer's, via EventsProgram/sports-full. Covers both rugby codes on
+# this platform (rugby union and rugby league both live under sportTypeId
+# 14); see module docstring.
+RUGBY_SPORT_TYPE_ID = 14
 
 # "1x2" (moneyline) market group id, confirmed constant across leagues by
 # checking /api/frontend/events/{leagueId}/categories-and-odds-groups for
@@ -102,6 +149,23 @@ DEFAULT_LEAGUE_IDS: dict[int, str] = {
     990677: "UEFA Champions League",
 }
 
+# Rugby competition eventIds (from /api/b2c/EventsProgram/program?sportId=197),
+# same discovery path as soccer's DEFAULT_LEAGUE_IDS. This is the *entire*
+# live rugby program on the platform (30 subEvents total, matching
+# sports-full's count for sportId 197) -- not a narrowed-down subset the way
+# soccer's list is, since rugby's whole program here is already small. See
+# module docstring for why no Currie Cup / Rugby Championship / Six Nations
+# ids are included (not listed as live at discovery time).
+DEFAULT_RUGBY_LEAGUE_IDS: dict[int, str] = {
+    990807: "United Rugby Championship",
+    990802: "English Premiership",
+    990884: "National Provincial Championship",
+    990797: "Top 14",
+    990812: "NRL Premiership",
+    990809: "Super League",
+    991109: "NRL, Women",
+}
+
 # Plain, fixed-interval polling -- same cadence as a normal page refresh,
 # not randomized or disguised to look human.
 DEFAULT_POLL_INTERVAL_SECONDS = 45
@@ -114,33 +178,76 @@ class SupaBetsScraper(BaseScraper):
         self,
         league_ids: dict[int, str] | None = None,
         sport_type_id: int = SOCCER_SPORT_TYPE_ID,
+        rugby_league_ids: dict[int, str] | None = None,
     ):
+        """`league_ids`/`sport_type_id` are the original soccer-only
+        constructor params and keep their original meaning: passing
+        `league_ids` explicitly scopes this scraper to *just* that single
+        sport (soccer by default, or whichever `sport_type_id` is given),
+        the same override behavior as before rugby support existed -- it
+        does not also implicitly pull in rugby.
+
+        Leave both `league_ids` and `rugby_league_ids` unset (the default)
+        to get the additive behavior: soccer's and rugby's default league
+        lists polled together every cycle. Pass `rugby_league_ids` to widen
+        or narrow rugby's scope the same way `league_ids` does for soccer.
+        """
         self.league_ids = league_ids if league_ids is not None else dict(DEFAULT_LEAGUE_IDS)
         self.sport_type_id = sport_type_id
+
+        if league_ids is not None:
+            # Explicit legacy override: single sport, exactly as specified.
+            sport_name = "rugby" if sport_type_id == RUGBY_SPORT_TYPE_ID else "soccer"
+            self._sport_scopes: list[tuple[int, str, dict[int, str]]] = [
+                (sport_type_id, sport_name, self.league_ids)
+            ]
+        else:
+            self._sport_scopes = [
+                (SOCCER_SPORT_TYPE_ID, "soccer", dict(DEFAULT_LEAGUE_IDS)),
+                (
+                    RUGBY_SPORT_TYPE_ID,
+                    "rugby",
+                    rugby_league_ids if rugby_league_ids is not None else dict(DEFAULT_RUGBY_LEAGUE_IDS),
+                ),
+            ]
+
         self._client = httpx.AsyncClient(timeout=10, headers=API_KEY_HEADER)
 
     async def fetch_raw_odds(self) -> dict:
-        """Fetches the nearest-matchday odds for each configured league.
+        """Fetches the nearest-matchday odds for each configured league,
+        across every configured sport (soccer and, by default, rugby).
 
         Unlike Betway ZA/WSB's single bulk call, SupaBets has no "all
         matches" endpoint -- each league is its own HTTP request. A single
         league's request failing (transient network blip, that one
         competition temporarily unavailable) is caught and logged here
         rather than aborting the whole poll cycle: the other leagues'
-        odds are still worth publishing that cycle.
+        odds -- soccer or rugby -- are still worth publishing that cycle.
         """
         leagues_raw: dict[str, dict] = {}
-        for league_id, league_name in self.league_ids.items():
-            try:
-                response = await self._client.get(
-                    SUPABETS_MATCHES_URL_TEMPLATE.format(sport_type_id=self.sport_type_id),
-                    params={"n": 1, "league": league_id, "oddsGroupId": ONE_X_TWO_ODDS_GROUP_ID},
-                )
-                response.raise_for_status()
-                leagues_raw[str(league_id)] = {"league_name": league_name, "payload": response.json()}
-            except httpx.HTTPError as exc:
-                logger.warning("%s: failed to fetch league %s (%s): %s", self.bookmaker_id, league_id, league_name, exc)
-                continue
+        for sport_type_id, sport_name, league_ids in self._sport_scopes:
+            for league_id, league_name in league_ids.items():
+                try:
+                    response = await self._client.get(
+                        SUPABETS_MATCHES_URL_TEMPLATE.format(sport_type_id=sport_type_id),
+                        params={"n": 1, "league": league_id, "oddsGroupId": ONE_X_TWO_ODDS_GROUP_ID},
+                    )
+                    response.raise_for_status()
+                    leagues_raw[str(league_id)] = {
+                        "league_name": league_name,
+                        "payload": response.json(),
+                        "sport": sport_name,
+                    }
+                except httpx.HTTPError as exc:
+                    logger.warning(
+                        "%s: failed to fetch %s league %s (%s): %s",
+                        self.bookmaker_id,
+                        sport_name,
+                        league_id,
+                        league_name,
+                        exc,
+                    )
+                    continue
         return {"leagues": leagues_raw}
 
     def to_odds_events(self, raw: dict) -> list[OddsEvent]:
@@ -153,7 +260,11 @@ class SupaBetsScraper(BaseScraper):
         {id, value} -- joined here the same way Betway ZA joins its
         parallel events/markets/outcomes/prices arrays. Outcome labels
         ("1"/"X"/"2") come from the payload's own `markets[].options[]`
-        legend, not inferred from outcome-id sort order.
+        legend, not inferred from outcome-id sort order. Rugby's odds
+        payloads use this exact same shape and market/label legend as
+        soccer's (verified live for all of DEFAULT_RUGBY_LEAGUE_IDS -- see
+        module docstring), so no sport-specific parsing branch is needed
+        here, only the `sport` tag on the resulting OddsEvent.
 
         Note event_id (the OddsEvent field) is left unset here -- that's
         the engine's job downstream (see the note on OddsEvent.event_id in
@@ -165,6 +276,10 @@ class SupaBetsScraper(BaseScraper):
         for league_id, league_data in raw.get("leagues", {}).items():
             payload = league_data.get("payload") or {}
             league_name = league_data.get("league_name", "unknown")
+            # Defaults to "soccer" for back-compat with raw payloads built
+            # before rugby support existed (and by any caller/test that
+            # constructs a leagues dict without a "sport" key).
+            sport = league_data.get("sport", "soccer")
 
             # Every step below is defensive against a single malformed
             # record (a match/market/odds entry missing an expected field):
@@ -229,7 +344,7 @@ class SupaBetsScraper(BaseScraper):
 
                     odds_events.append(
                         OddsEvent(
-                            sport="soccer",
+                            sport=sport,
                             league=match.get("eventName") or league_name,
                             home_team=home_team,
                             away_team=away_team,

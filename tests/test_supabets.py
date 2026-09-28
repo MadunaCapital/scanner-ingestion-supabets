@@ -79,6 +79,91 @@ SAMPLE_MATCHES_PAYLOAD = {
 
 SAMPLE_RAW_PAYLOAD = {"leagues": {"990625": {"league_name": "Premier League", "payload": SAMPLE_MATCHES_PAYLOAD}}}
 
+# Shape captured from a real, plain GET (x-api-key header only, no session/
+# cookies) to SupaBets' public matches endpoint for rugby:
+#   GET https://apib2c.supabets.co.za/api/frontend/matches/14/section/leagues
+#       ?n=1&league=990807&oddsGroupId=1433
+# (14 = rugby's sportTypeId, 990807 = United Rugby Championship's
+# eventId, 1433 = the same "1x2" moneyline market group id soccer uses --
+# see scraper.py's docstring for how rugby's ids were found). Trimmed to two
+# matches' worth of records; field names, ids and decimal odds unchanged
+# from the real response. Note rugby reuses the exact same markets[].id
+# (79117) and outcome-option ids as soccer's capture -- evidently a
+# platform-wide market catalog, not soccer-specific.
+SAMPLE_RUGBY_MATCHES_PAYLOAD = {
+    "events": [
+        {
+            "id": "639264960000000000",
+            "name": "02 October 2026",
+            "matchCount": 3,
+            "order": 0,
+            "sportType": None,
+            "matches": [
+                {
+                    "id": 204450327,
+                    "eventName": "United Rugby Championship",
+                    "participants": [{"name": "Benetton Treviso"}, {"name": "Connacht Rugby"}],
+                    "slug": "spa/sport/rugby/rugby-union/united-rugby-championship/204450327-benetton-treviso-connacht-rugby",
+                    "start": "2026-10-02T18:45:00Z",
+                    "statisticsCode": "72871712",
+                    "oddsCount": 32,
+                    "odds": None,
+                },
+                {
+                    "id": 204450246,
+                    "eventName": "United Rugby Championship",
+                    "participants": [{"name": "Edinburgh Rugby"}, {"name": "Stormers"}],
+                    "slug": "spa/sport/rugby/rugby-union/united-rugby-championship/204450246-edinburgh-rugby-stormers",
+                    "start": "2026-10-02T18:45:00Z",
+                    "statisticsCode": "72871716",
+                    "oddsCount": 32,
+                    "odds": None,
+                },
+            ],
+        },
+        {"id": "639265824000000000", "name": "03 October 2026", "matchCount": 5, "order": 1, "sportType": None},
+    ],
+    "odds": {
+        "204450327": {
+            "79117": {
+                "911679": {"0.00": {"id": "2c319ca04", "value": 1.53}},
+                "911680": {"0.00": {"id": "2c319ca05", "value": 21.0}},
+                "911681": {"0.00": {"id": "2c319ca06", "value": 2.5}},
+            }
+        },
+        "204450246": {
+            "79117": {
+                "911679": {"0.00": {"id": "2c324b5ad", "value": 1.44}},
+                "911680": {"0.00": {"id": "2c320e6e4", "value": 20.0}},
+                "911681": {"0.00": {"id": "2c324b5ae", "value": 2.8}},
+            }
+        },
+    },
+    "markets": [
+        {
+            "id": 79117,
+            "name": "1x2",
+            "options": [
+                {"id": 911679, "name": "1"},
+                {"id": 911680, "name": "X"},
+                {"id": 911681, "name": "2"},
+            ],
+            "hndValue": 0.0,
+            "oddsClassId": 79117,
+        }
+    ],
+}
+
+SAMPLE_RUGBY_RAW_PAYLOAD = {
+    "leagues": {
+        "990807": {
+            "league_name": "United Rugby Championship",
+            "payload": SAMPLE_RUGBY_MATCHES_PAYLOAD,
+            "sport": "rugby",
+        }
+    }
+}
+
 
 def test_to_odds_events_joins_events_odds_and_markets_legend():
     scraper = SupaBetsScraper()
@@ -137,6 +222,67 @@ def test_to_odds_events_maps_outcome_labels_not_id_order():
     assert market.draw_odds == 1.41
     # outcome 911680 (value 4.64) is now labelled "2" -> away
     assert market.away_odds == 4.64
+
+
+def test_to_odds_events_tags_rugby_events_with_sport_rugby():
+    """Rugby league payloads carry an explicit "sport": "rugby" tag (set by
+    fetch_raw_odds) rather than the "soccer" default -- to_odds_events must
+    read it off the raw payload instead of hardcoding a sport."""
+    scraper = SupaBetsScraper()
+
+    events = scraper.to_odds_events(SAMPLE_RUGBY_RAW_PAYLOAD)
+
+    assert len(events) == 2
+    treviso_connacht = next(e for e in events if e.home_team == "Benetton Treviso")
+    assert treviso_connacht.away_team == "Connacht Rugby"
+    assert treviso_connacht.sport == "rugby"
+    assert treviso_connacht.league == "United Rugby Championship"
+    assert treviso_connacht.bookmaker == "supabets"
+    assert treviso_connacht.markets["moneyline"].home_odds == 1.53
+    assert treviso_connacht.markets["moneyline"].draw_odds == 21.0
+    assert treviso_connacht.markets["moneyline"].away_odds == 2.5
+    assert all(e.sport == "rugby" for e in events)
+
+
+def test_to_odds_events_maps_rugby_outcome_labels_not_id_order():
+    """Same explicit-label-not-id-order guarantee soccer has, verified
+    against rugby's payload shape too (rugby uses the same market/outcome
+    ids as soccer in practice, but the mapping must not rely on that)."""
+    payload = {
+        **SAMPLE_RUGBY_MATCHES_PAYLOAD,
+        "odds": {
+            "204450327": SAMPLE_RUGBY_MATCHES_PAYLOAD["odds"]["204450327"],
+        },
+        "markets": [
+            {
+                "id": 79117,
+                "name": "1x2",
+                # Deliberately out-of-order / re-numbered ids relative to
+                # the real capture, to prove label lookup drives the
+                # mapping rather than id ordering.
+                "options": [
+                    {"id": 911681, "name": "1"},
+                    {"id": 911679, "name": "X"},
+                    {"id": 911680, "name": "2"},
+                ],
+                "hndValue": 0.0,
+                "oddsClassId": 79117,
+            }
+        ],
+    }
+    raw = {"leagues": {"990807": {"league_name": "United Rugby Championship", "payload": payload, "sport": "rugby"}}}
+    scraper = SupaBetsScraper()
+
+    events = scraper.to_odds_events(raw)
+
+    assert len(events) == 1
+    market = events[0].markets["moneyline"]
+    # outcome 911681 (value 2.5) is now labelled "1" -> home
+    assert market.home_odds == 2.5
+    # outcome 911679 (value 1.53) is now labelled "X" -> draw
+    assert market.draw_odds == 1.53
+    # outcome 911680 (value 21.0) is now labelled "2" -> away
+    assert market.away_odds == 21.0
 
 
 def test_to_odds_events_skips_league_missing_1x2_market_definition():
@@ -316,6 +462,78 @@ async def test_poll_continues_past_a_transient_fetch_failure(monkeypatch):
     assert call_count == 2
     assert len(results) == 1
     assert len(results[0]) == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_raw_odds_polls_soccer_and_rugby_together_by_default(monkeypatch):
+    """Default construction (no league_ids/rugby_league_ids override) must
+    poll both soccer's and rugby's default league lists additively -- the
+    core ask of adding rugby support -- and tag each league with the sport
+    it actually came from."""
+    scraper = SupaBetsScraper()
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    seen_urls = []
+
+    async def fake_get(url, params=None):
+        seen_urls.append(url)
+        return FakeResponse(SAMPLE_MATCHES_PAYLOAD)
+
+    monkeypatch.setattr(scraper._client, "get", fake_get)
+
+    raw = await scraper.fetch_raw_odds()
+
+    from supabets.scraper import DEFAULT_LEAGUE_IDS, DEFAULT_RUGBY_LEAGUE_IDS
+
+    expected_league_ids = {str(k) for k in {**DEFAULT_LEAGUE_IDS, **DEFAULT_RUGBY_LEAGUE_IDS}}
+    assert set(raw["leagues"].keys()) == expected_league_ids
+
+    soccer_sports = {raw["leagues"][str(lid)]["sport"] for lid in DEFAULT_LEAGUE_IDS}
+    rugby_sports = {raw["leagues"][str(lid)]["sport"] for lid in DEFAULT_RUGBY_LEAGUE_IDS}
+    assert soccer_sports == {"soccer"}
+    assert rugby_sports == {"rugby"}
+
+    # Requests went to both sportTypeId=1 (soccer) and sportTypeId=14 (rugby)
+    # matches endpoints.
+    assert any("/matches/1/" in url for url in seen_urls)
+    assert any("/matches/14/" in url for url in seen_urls)
+
+
+@pytest.mark.asyncio
+async def test_fetch_raw_odds_league_ids_override_stays_soccer_only(monkeypatch):
+    """Passing `league_ids` explicitly is the pre-rugby override behavior:
+    it must scope the scraper to that single sport only, not implicitly add
+    rugby's default leagues too."""
+    scraper = SupaBetsScraper(league_ids={990625: "Premier League"})
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    async def fake_get(url, params=None):
+        return FakeResponse(SAMPLE_MATCHES_PAYLOAD)
+
+    monkeypatch.setattr(scraper._client, "get", fake_get)
+
+    raw = await scraper.fetch_raw_odds()
+
+    assert list(raw["leagues"].keys()) == ["990625"]
+    assert raw["leagues"]["990625"]["sport"] == "soccer"
 
 
 @pytest.mark.asyncio
